@@ -461,13 +461,20 @@ Item {
     readonly property real tubeH: Math.max(3, platter.width * 0.028)
     readonly property real cy: height / 2
     readonly property real noseOff: -tubeH * 1.1     // lateral offset of the nose
-    readonly property real angle: root.engaged ? root.angleOn : root.angleRest
+    // Two motions kept apart so neither restarts the other: the swing on and
+    // off the record (swing 0..1) and the slow creep inward as the side
+    // plays (a smoothed progress). The angle is composed from both.
+    property real swing: root.engaged ? 1 : 0
+    Behavior on swing { NumberAnimation { duration: 1100; easing.type: Easing.InOutCubic } }
+    property real creep: Math.max(0, Math.min(1, root.progress))
+    Behavior on creep { NumberAnimation { duration: 900; easing.type: Easing.InOutQuad } }
+    readonly property real angleOnSmooth: -(68.3 - creep * 20.8)
+    readonly property real angle: root.angleRest + (angleOnSmooth - root.angleRest) * swing
 
     transform: Rotation {
       origin.x: arm.pivotLocalX
       origin.y: arm.cy
       angle: arm.angle
-      Behavior on angle { NumberAnimation { duration: 1100; easing.type: Easing.InOutCubic } }
     }
 
     Canvas {

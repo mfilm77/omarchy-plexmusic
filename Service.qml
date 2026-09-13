@@ -234,12 +234,20 @@ Item {
     }
   }
 
+  // While a play command is in flight mpv is stopped and relaunched, and a
+  // poll landing in that gap would report "not playing" — which lifted the
+  // arm and dropped it again. Hold the playing state through the start.
+  property bool playStarting: false
+  Timer { id: startGuard; interval: 5000; onTriggered: root.playStarting = false }
+
   Process {
     id: playProc
+    onRunningChanged: if (running) { root.playStarting = true; startGuard.restart() }
     stdout: StdioCollector {
       onStreamFinished: {
         var d = root.parse(text)
         root.lastError = (d && d.ok === false) ? (d.error || "could not play that") : ""
+        if (d && d.ok === false) root.playStarting = false
         root.refreshNow()
       }
     }
@@ -257,6 +265,8 @@ Item {
       onStreamFinished: {
         var d = root.parse(text)
         if (!d) return
+        if (!d.playing && root.playStarting) return      // mid-relaunch: keep what we had
+        if (d.playing) root.playStarting = false
         root.playing = !!d.playing
         if (!d.playing) {
           root.trackKey = ""; root.trackAlbumKey = ""

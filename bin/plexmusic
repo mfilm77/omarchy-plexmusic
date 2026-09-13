@@ -330,13 +330,23 @@ class Plex:
                 "key": str(m.get("ratingKey")),
                 "title": m.get("title") or "",
                 "year": m.get("year") or 0,
-                "tracks": m.get("leafCount") or m.get("childCount") or 0,
+                # Neither leafCount nor childCount is in this listing; the
+                # per-album metadata has it and is one small request each.
+                "tracks": m.get("leafCount") or m.get("childCount") or self.album_track_count(str(m.get("ratingKey"))),
                 "thumb": thumb,
                 "artUrl": self.art_url(thumb),
             })
         # Newest first, as a discography is usually read.
         albums.sort(key=lambda a: (-(a["year"] or 0), a["title"].lower()))
         return albums
+
+    def album_track_count(self, album_key: str) -> int:
+        try:
+            data = self.get(f"/library/metadata/{album_key}")
+            items = data.get("MediaContainer", {}).get("Metadata", []) or []
+            return int(items[0].get("leafCount") or items[0].get("childCount") or 0) if items else 0
+        except Exception:
+            return 0
 
     def playlists(self) -> list[dict]:
         data = self.get("/playlists", {"playlistType": "audio"})
@@ -565,7 +575,7 @@ def mpv_stop() -> None:
         pass
 
 
-def mpv_launch(playlist_path: str, shuffle: bool) -> None:
+def mpv_launch(playlist_path: str, shuffle: bool, start_index: int = 0) -> None:
     mpv_stop()
     args = [
         "mpv",
@@ -586,6 +596,10 @@ def mpv_launch(playlist_path: str, shuffle: bool) -> None:
     ]
     if shuffle:
         args.append("--shuffle")
+    if start_index > 0:
+        # Start partway through the queue while keeping the whole of it, so
+        # position N of M is really N of M and "previous" can go back.
+        args.append(f"--playlist-start={start_index}")
     # Escape hatch for output device, replaygain mode, filters, etc.
     extra = os.environ.get("PLEXMUSIC_MPV_ARGS", "").strip()
     if extra:
@@ -954,12 +968,13 @@ def cmd_play(args) -> None:
     if not tracks:
         die("nothing playable there")
 
-    # Start partway through an album or playlist: everything before the chosen
-    # track is dropped rather than reordered, so "next" still means next.
+    # Start partway through an album or playlist without dropping what comes
+    # before it: the needle then lands at the right groove and "previous" works.
+    start_index = 0
     if args.start_at:
         for i, t in enumerate(tracks):
             if t["key"] == str(args.start_at):
-                tracks = tracks[i:]
+                start_index = i
                 break
 
     lines = ["#EXTM3U"]
@@ -988,11 +1003,11 @@ def cmd_play(args) -> None:
         "tracks": tracks,
     })
 
-    mpv_launch(PLAYLIST_FILE, shuffle=args.shuffle)
-    # Warm the first cover so the panel has art to show immediately.
+    mpv_launch(PLAYLIST_FILE, shuffle=args.shuffle, start_index=start_index)
+    # Warm the cover of the track that will sound first.
     first_art = None
     if tracks:
-        first_art = plex.art_path(tracks[0].get("albumThumb", ""))
+        first_art = plex.art_path(tracks[start_index].get("albumThumb", ""))
     emit({"trackCount": len(tracks), "source": source,
           "shuffle": bool(args.shuffle), "art": first_art})
 
@@ -1008,7 +1023,15 @@ def cmd_cmd(args) -> None:
     elif action == "next":
         mpv_request(["playlist-next", "force"])
     elif action == "prev":
-        mpv_request(["playlist-prev", "force"])
+        # On the first track (or more than a few seconds in) "previous" means
+        # the start of this track, as on every player; forcing playlist-prev
+        # at the start of the queue makes mpv quit.
+        pos = mpv_get("playlist-pos") or 0
+        elapsed = mpv_get("time-pos") or 0
+        if pos <= 0 or elapsed > 4:
+            mpv_request(["seek", 0, "absolute"])
+        else:
+            mpv_request(["playlist-prev"])
     elif action == "stop":
         mpv_stop()
     elif action == "volume":
