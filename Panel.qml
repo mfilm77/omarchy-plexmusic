@@ -105,10 +105,10 @@ PanelWindow {
     width: Math.min(1140, parent.width - 80)
     height: Math.min(740, parent.height - 80)
     radius: 16
-    // A touch of the desktop shows through the card — 5% — so it sits on the
-    // screen rather than covering it.
+    // The desktop shows through the card — it is 80% opaque — so it sits on
+    // the screen rather than covering it.
     color: Qt.rgba(Color.popups.background.r, Color.popups.background.g,
-                   Color.popups.background.b, 0.95)
+                   Color.popups.background.b, 0.80)
     border.width: 1
     border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g,
                           Color.popups.border.b, 0.6)
@@ -294,6 +294,7 @@ PanelWindow {
           spinning: root.service ? (root.service.playing && !root.service.paused) : false
           // Paused or stopped, the arm goes back to its rest, off the record.
           engaged: root.service ? (root.service.playing && !root.service.paused) : false
+          volume: root.service ? root.service.volume : 100
           art: root.service ? root.service.artPath : ""
           // The arm reads the whole side, not the track: first song at the outer
           // groove, last song by the label, creeping inward as each one plays.
@@ -306,10 +307,20 @@ PanelWindow {
           }
         }
 
+        // The volume fader stands beside the arm, above the timeline.
+        Fader {
+          anchors.right: parent.right
+          anchors.rightMargin: 2
+          anchors.bottom: vinyl.bottom
+          anchors.bottomMargin: 6
+          value: root.service ? root.service.volume : 100
+          enabled: root.service ? root.service.playing : false
+          onMoved: function (v) { if (root.service) root.service.setVolume(v) }
+          onDraggingChanged: if (root.service) root.service.volumeDragging = dragging
+        }
+
         Column {
           anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-          // Leave the fader its own column at the right edge.
-          anchors.rightMargin: 36
           spacing: 8
 
           Text {
@@ -459,18 +470,6 @@ PanelWindow {
             color: root.dim(0.35)
           }
         }
-      }
-
-      // A console fader for volume, small, at the deck's right edge.
-      Fader {
-        anchors.right: deck.right
-        anchors.rightMargin: 4
-        anchors.bottom: deck.bottom
-        anchors.bottomMargin: 2
-        value: root.service ? root.service.volume : 100
-        enabled: root.service ? root.service.playing : false
-        onMoved: function (v) { if (root.service) root.service.setVolume(v) }
-        onDraggingChanged: if (root.service) root.service.volumeDragging = dragging
       }
 
       // ---- right: the browser -----------------------------------------------

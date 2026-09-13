@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Effects
-import QtQuick.Shapes
 import qs.Commons
 
 // A record on a platter: black disc, cut grooves, the album cover as the label.
@@ -13,26 +12,47 @@ Item {
 
   property bool spinning: false
   property string art: ""
-  property real labelRatio: 0.36      // label diameter as a share of the disc
+  property real labelRatio: 0.29      // label diameter as a share of the disc
 
   // Never negative: the panel's arithmetic can go below zero mid-layout and
   // every radius below depends on this.
   readonly property real size: Math.max(0, Math.min(width, height))
   readonly property real labelSize: size * labelRatio
 
-  component ArmPath: ShapePath {
-    capStyle: ShapePath.RoundCap
-    joinStyle: ShapePath.RoundJoin
-    fillColor: "transparent"
-    property real dy: 0
-    startX: arm.pivotLocalX + root.size * 0.02; startY: arm.height / 2 + dy
-    PathLine { x: arm.pivotLocalX - arm.width * 0.34; y: arm.height / 2 + dy }
-    PathCubic {
-      x: arm.tubeStart; y: arm.height / 2 + arm.sOff + dy
-      control1X: arm.pivotLocalX - arm.width * 0.62; control1Y: arm.height / 2 + dy
-      control2X: arm.tubeStart + arm.width * 0.18; control2Y: arm.height / 2 + arm.sOff * 1.9 + dy
+  // ---- neon ----------------------------------------------------------------
+  //
+  // A ring of light around the record, pink on one side and blue on the
+  // other, that breathes with the volume: full at 100, a glimmer at 0, off
+  // when nothing is on. Drawn behind the platter as widening, fading strokes.
+  property real volume: 100
+  Canvas {
+    id: neon
+    anchors.centerIn: platter
+    width: platter.width * 1.30
+    height: width
+    z: -1
+    antialiasing: true
+    smooth: true
+    renderStrategy: Canvas.Cooperative
+    opacity: root.engaged ? (0.12 + 0.88 * Math.max(0, Math.min(100, root.volume)) / 100) : 0
+    Behavior on opacity { NumberAnimation { duration: 260 } }
+    onPaint: {
+      if (!(width > 0)) return
+      var ctx = getContext("2d"); ctx.reset()
+      var c = width / 2, r = platter.width / 2
+      var a = Color.accent, u = Color.urgent
+      function rgba(col, al) { return "rgba(" + Math.round(col.r*255) + "," + Math.round(col.g*255) + "," + Math.round(col.b*255) + "," + al + ")" }
+      var passes = [[1.010, 3, 0.55], [1.016, 8, 0.28], [1.028, 18, 0.14], [1.050, 34, 0.07], [1.085, 56, 0.035]]
+      for (var i = 0; i < passes.length; i++) {
+        var g = ctx.createConicalGradient(c, c, 0.9)
+        g.addColorStop(0.00, rgba(u, passes[i][2])); g.addColorStop(0.25, rgba(a, passes[i][2]))
+        g.addColorStop(0.50, rgba(u, passes[i][2] * 0.8)); g.addColorStop(0.75, rgba(a, passes[i][2]))
+        g.addColorStop(1.00, rgba(u, passes[i][2]))
+        ctx.strokeStyle = g; ctx.lineWidth = passes[i][1]
+        ctx.beginPath(); ctx.arc(c, c, r * passes[i][0] + passes[i][1] / 2, 0, Math.PI * 2); ctx.stroke()
+      }
     }
-    }
+  }
 
   // ---- the disc ------------------------------------------------------------
 
@@ -366,159 +386,157 @@ Item {
     }
   }
 
-  // The bearing housing does not turn; the arm turns inside it.
-  Rectangle {
+  // The bearing: a polished round base the arm turns in. Static.
+  Item {
     id: bearing
     x: root.pivotX - width / 2
     y: root.pivotY - height / 2
-    width: platter.width * 0.12
+    width: platter.width * 0.15
     height: width
-    radius: width / 2
     z: 3
-    antialiasing: true
-    gradient: Gradient {
-      GradientStop { position: 0.0; color: Qt.lighter(root.housing, 1.25) }
-      GradientStop { position: 1.0; color: Qt.darker(root.housing, 1.5) }
-    }
-    border.width: 1
-    border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.3)
-
-    Rectangle {
-      anchors.centerIn: parent
-      width: parent.width * 0.42
-      height: width
-      radius: width / 2
-      color: Qt.darker(root.housing, 2.2)
-      border.width: 1
-      border.color: Qt.rgba(0, 0, 0, 0.6)
+    Canvas {
+      anchors.fill: parent
       antialiasing: true
+      smooth: true
+      renderStrategy: Canvas.Cooperative
+      onPaint: {
+        if (!(width > 0)) return
+        var ctx = getContext("2d"); ctx.reset()
+        var c = width / 2, r = c * 0.96
+        var m = root.metal
+        function rgba(col, a) { return "rgba(" + Math.round(col.r*255) + "," + Math.round(col.g*255) + "," + Math.round(col.b*255) + "," + a + ")" }
+        // Shadow on the plinth.
+        var sh = ctx.createRadialGradient(c, c + r * 0.15, r * 0.6, c, c + r * 0.15, r * 1.25)
+        sh.addColorStop(0, "rgba(0,0,0,0.45)"); sh.addColorStop(1, "rgba(0,0,0,0)")
+        ctx.fillStyle = sh; ctx.beginPath(); ctx.arc(c, c + r * 0.15, r * 1.25, 0, Math.PI * 2); ctx.fill()
+        // Base disc, brushed: light top-left to dark bottom-right.
+        var g = ctx.createLinearGradient(c - r, c - r, c + r, c + r)
+        g.addColorStop(0, rgba(Qt.lighter(m, 1.35), 1)); g.addColorStop(0.5, rgba(m, 1)); g.addColorStop(1, rgba(Qt.darker(m, 2.2), 1))
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(c, c, r, 0, Math.PI * 2); ctx.fill()
+        ctx.lineWidth = 1; ctx.strokeStyle = "rgba(0,0,0,0.55)"; ctx.stroke()
+        // Raised boss.
+        var g2 = ctx.createLinearGradient(c, c - r * 0.5, c, c + r * 0.5)
+        g2.addColorStop(0, rgba(Qt.lighter(m, 1.5), 1)); g2.addColorStop(1, rgba(Qt.darker(m, 1.9), 1))
+        ctx.fillStyle = g2; ctx.beginPath(); ctx.arc(c, c, r * 0.5, 0, Math.PI * 2); ctx.fill()
+        ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.stroke()
+        // Pivot pin.
+        ctx.fillStyle = rgba(Qt.darker(m, 3), 1); ctx.beginPath(); ctx.arc(c, c, r * 0.12, 0, Math.PI * 2); ctx.fill()
+      }
     }
   }
 
+  // The arm itself, painted once as a single illustration — tube, headshell,
+  // cartridge, stylus, counterweight — then rotated as one smooth texture
+  // about the pivot. Painting it beats assembling it from rotated rectangles,
+  // whose edges step and whose joins break.
   Item {
     id: arm
-    // Spans stylus (x = 0) to the back of the counterweight (x = width); the
-    // pivot is inside it, cwLen from the right end.
-    width: root.armLen + root.cwLen
-    height: root.size * 0.09
-    x: root.pivotX - root.armLen
+    // Local frame: the pivot is at (pivotLocalX, height/2); the tube runs
+    // toward x = 0 where the headshell sits; the counterweight is to the right.
+    readonly property real pad: root.size * 0.06
+    readonly property real pivotLocalX: pad + root.armLen
+    width: pivotLocalX + root.cwLen + pad
+    height: root.size * 0.20
+    x: root.pivotX - pivotLocalX
     y: root.pivotY - height / 2
     z: 2
-    readonly property real pivotLocalX: root.armLen
-    readonly property real tubeH: Math.max(2.5, root.size * 0.026)
+    readonly property real tubeH: Math.max(3, platter.width * 0.028)
+    readonly property real cy: height / 2
+    readonly property real noseOff: -tubeH * 1.1     // lateral offset of the nose
+    readonly property real angle: root.engaged ? root.angleOn : root.angleRest
 
     transform: Rotation {
       origin.x: arm.pivotLocalX
-      origin.y: arm.height / 2
-      angle: root.engaged ? root.angleOn : root.angleRest
-      Behavior on angle {
-        NumberAnimation { duration: 1100; easing.type: Easing.InOutCubic }
-      }
+      origin.y: arm.cy
+      angle: arm.angle
+      Behavior on angle { NumberAnimation { duration: 1100; easing.type: Easing.InOutCubic } }
     }
 
-    // The tube, S-curved as on a classic deck: straight out of the bearing,
-    // a gentle bend one way and back the other so the headshell ends up
-    // offset from the pivot line. Three strokes of the same path make it a
-    // cylinder: a soft shadow on the record, the body, a highlight along the
-    // top.
-    readonly property real sOff: -arm.tubeH * 1.6      // lateral offset of the nose
-    readonly property real tubeStart: root.size * 0.085 // where the headshell collar begins
-    Shape {
+    Canvas {
+      id: armPaint
       anchors.fill: parent
       antialiasing: true
-      layer.enabled: true; layer.samples: 4
-      ArmPath { dy: 3; strokeColor: Qt.rgba(0, 0, 0, 0.35); strokeWidth: arm.tubeH }
-      ArmPath { dy: 0; strokeColor: root.metalDark; strokeWidth: arm.tubeH }
-      ArmPath { dy: -arm.tubeH * 0.22; strokeColor: Qt.lighter(root.metal, 1.2); strokeWidth: Math.max(1, arm.tubeH * 0.45) }
-    }
+      smooth: true
+      renderStrategy: Canvas.Cooperative
+      onPaint: {
+        if (!(width > 0) || !(height > 0)) return
+        var ctx = getContext("2d"); ctx.reset()
+        var m = root.metal, md = root.metalDark, acc = Color.accent
+        function rgba(col, a) { return "rgba(" + Math.round(col.r*255) + "," + Math.round(col.g*255) + "," + Math.round(col.b*255) + "," + a + ")" }
+        var px = arm.pivotLocalX, cy = arm.cy, T = arm.tubeH, L = root.armLen
+        var nose = arm.pad + root.size * 0.035          // where the tube meets the headshell
+        var off = arm.noseOff
 
-    // Counterweight: a fat knurled cylinder behind the pivot.
-    Rectangle {
-      x: arm.pivotLocalX + root.size * 0.035
-      y: arm.height / 2 - height / 2
-      width: root.cwLen - root.size * 0.035
-      height: arm.tubeH * 2.6
-      radius: 3
-      antialiasing: true
-      gradient: Gradient {
-        GradientStop { position: 0.0; color: Qt.lighter(root.housing, 1.4) }
-        GradientStop { position: 0.5; color: root.housing }
-        GradientStop { position: 1.0; color: Qt.darker(root.housing, 1.8) }
-      }
-      border.width: 1
-      border.color: Qt.rgba(0, 0, 0, 0.55)
-      // Knurling.
-      Row {
-        anchors.centerIn: parent
-        spacing: 2
-        Repeater {
-          model: 4
-          Rectangle { width: 1; height: parent.parent.height * 0.6; color: Qt.rgba(0, 0, 0, 0.35) }
+        // ---- the tube path: straight out of the bearing, then a long S.
+        function tubePath(dy) {
+          ctx.beginPath()
+          ctx.moveTo(px + root.size * 0.015, cy + dy)
+          ctx.lineTo(px - L * 0.30, cy + dy)
+          // One sweep: bows away from the spindle side, then comes back to
+          // land on the nose heading the way the headshell points.
+          ctx.bezierCurveTo(px - L * 0.72, cy + dy,  nose + L * 0.30, cy - off * 1.6 + dy,  nose, cy + off + dy)
         }
-      }
-    }
+        ctx.lineCap = "round"; ctx.lineJoin = "round"
+        // shadow
+        tubePath(3); ctx.lineWidth = T * 1.1; ctx.strokeStyle = "rgba(0,0,0,0.35)"; ctx.stroke()
+        // body: dark, then mid, then a highlight ridge along the top
+        tubePath(0); ctx.lineWidth = T; ctx.strokeStyle = rgba(md, 1); ctx.stroke()
+        tubePath(-T * 0.10); ctx.lineWidth = T * 0.62; ctx.strokeStyle = rgba(m, 1); ctx.stroke()
+        tubePath(-T * 0.26); ctx.lineWidth = T * 0.22; ctx.strokeStyle = rgba(Qt.lighter(m, 1.45), 0.95); ctx.stroke()
 
-    // Headshell: a slim shell continuing the tube, offset toward the spindle
-    // by about 20 degrees as a real one is, with the cartridge at its nose.
-    // Everything is symmetric about the arm's centre line so it reads as an
-    // angled headshell and not a twisted one.
-    Item {
-      id: headshell
-      x: 0
-      y: arm.height / 2 - height / 2 + arm.sOff
-      width: root.size * 0.12
-      height: arm.tubeH * 2.6
-      transform: Rotation { origin.x: headshell.width; origin.y: headshell.height / 2; angle: 22 }
+        // ---- counterweight: a short fat cylinder behind the pivot.
+        var cwX = px + root.size * 0.028, cwW = root.cwLen - root.size * 0.02, cwH = T * 2.6
+        var cg = ctx.createLinearGradient(0, cy - cwH / 2, 0, cy + cwH / 2)
+        cg.addColorStop(0, rgba(Qt.lighter(m, 1.3), 1)); cg.addColorStop(0.45, rgba(m, 1)); cg.addColorStop(1, rgba(Qt.darker(m, 2.4), 1))
+        ctx.fillStyle = cg
+        ctx.beginPath(); ctx.roundedRect(cwX, cy - cwH / 2, cwW, cwH, 2.5, 2.5); ctx.fill()
+        ctx.lineWidth = 1; ctx.strokeStyle = "rgba(0,0,0,0.55)"; ctx.stroke()
+        ctx.strokeStyle = "rgba(0,0,0,0.30)"
+        for (var k = 1; k <= 4; k++) { var gx = cwX + cwW * k / 5; ctx.beginPath(); ctx.moveTo(gx, cy - cwH * 0.32); ctx.lineTo(gx, cy + cwH * 0.32); ctx.stroke() }
 
-      // Collar where the shell meets the tube.
-      Rectangle {
-        anchors.right: parent.right
-        anchors.verticalCenter: parent.verticalCenter
-        width: parent.width * 0.16
-        height: arm.tubeH * 1.5
-        radius: 1.5
-        color: root.metalDark
-        antialiasing: true
-      }
-      // The shell, tapering slightly toward the nose.
-      Rectangle {
-        anchors.left: parent.left
-        anchors.leftMargin: parent.width * 0.06
-        anchors.right: parent.right
-        anchors.rightMargin: parent.width * 0.14
-        anchors.verticalCenter: parent.verticalCenter
-        height: parent.height
-        radius: 2
-        antialiasing: true
-        gradient: Gradient {
-          GradientStop { position: 0.0; color: Qt.lighter(root.metal, 1.15) }
-          GradientStop { position: 0.5; color: root.metal }
-          GradientStop { position: 1.0; color: root.metalDark }
+        // ---- headshell, modelled on a classic slim plate: a collar where it
+        // meets the tube, a long flat shell with slots, a thin finger lift,
+        // a small cartridge under the front and a tiny stylus. Every corner
+        // rounded; nothing here should read as a block.
+        ctx.save()
+        ctx.translate(nose, cy + off)
+        ctx.rotate(22 * Math.PI / 180)
+        var hsL = root.size * 0.155, hsH = T * 1.55
+        function metalGrad(y0, y1) {
+          var gg = ctx.createLinearGradient(0, y0, 0, y1)
+          gg.addColorStop(0, rgba(Qt.lighter(m, 1.35), 1)); gg.addColorStop(0.5, rgba(m, 1)); gg.addColorStop(1, rgba(Qt.darker(m, 2.0), 1))
+          return gg
         }
-        border.width: 1
-        border.color: Qt.rgba(0, 0, 0, 0.45)
+        // collar
+        ctx.fillStyle = metalGrad(-T * 0.9, T * 0.9)
+        ctx.beginPath(); ctx.roundedRect(-hsL * 0.10, -T * 0.9, hsL * 0.14, T * 1.8, T * 0.35, T * 0.35); ctx.fill()
+        ctx.lineWidth = 1; ctx.strokeStyle = "rgba(0,0,0,0.45)"; ctx.stroke()
+        // plate shadow on the record
+        ctx.fillStyle = "rgba(0,0,0,0.30)"
+        ctx.beginPath(); ctx.roundedRect(-hsL, -hsH / 2 + 3, hsL * 0.94, hsH, hsH * 0.3, hsH * 0.3); ctx.fill()
+        // plate
+        ctx.fillStyle = metalGrad(-hsH / 2, hsH / 2)
+        ctx.beginPath(); ctx.roundedRect(-hsL, -hsH / 2, hsL * 0.94, hsH, hsH * 0.3, hsH * 0.3); ctx.fill()
+        ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.stroke()
+        // slots in the plate
+        ctx.fillStyle = "rgba(0,0,0,0.35)"
+        for (var q = 0; q < 3; q++) {
+          ctx.beginPath(); ctx.roundedRect(-hsL * (0.30 + q * 0.18), -hsH * 0.14, hsL * 0.10, hsH * 0.28, 1, 1); ctx.fill()
+        }
+        // finger lift: a slim bar off the plate's back edge
+        ctx.strokeStyle = rgba(Qt.lighter(m, 1.15), 1); ctx.lineWidth = Math.max(1.5, T * 0.38); ctx.lineCap = "round"
+        ctx.beginPath(); ctx.moveTo(-hsL * 0.40, -hsH * 0.5); ctx.lineTo(-hsL * 0.62, -hsH * 1.15); ctx.stroke()
+        // cartridge under the front: small, dark, with a thin accent line
+        ctx.fillStyle = rgba(Qt.darker(m, 2.6), 1)
+        ctx.beginPath(); ctx.roundedRect(-hsL * 0.96, hsH * 0.30, hsL * 0.30, hsH * 0.55, 1.5, 1.5); ctx.fill()
+        ctx.strokeStyle = rgba(acc, 0.9); ctx.lineWidth = 1
+        ctx.beginPath(); ctx.moveTo(-hsL * 0.93, hsH * 0.58); ctx.lineTo(-hsL * 0.69, hsH * 0.58); ctx.stroke()
+        // stylus
+        ctx.strokeStyle = rgba(Color.foreground, 0.95); ctx.lineWidth = Math.max(1, T * 0.2)
+        ctx.beginPath(); ctx.moveTo(-hsL * 0.84, hsH * 0.85); ctx.lineTo(-hsL * 0.88, hsH * 1.25); ctx.stroke()
+        ctx.restore()
       }
-      // Cartridge at the nose, in the accent colour, centred on the line.
-      Rectangle {
-        anchors.left: parent.left
-        anchors.verticalCenter: parent.verticalCenter
-        width: parent.width * 0.32
-        height: parent.height * 0.78
-        radius: 1.5
-        color: Color.accent
-        border.width: 1
-        border.color: Qt.darker(Color.accent, 1.6)
-        antialiasing: true
-      }
-      // Stylus tip.
-      Rectangle {
-        anchors.left: parent.left
-        anchors.leftMargin: -1.5
-        anchors.verticalCenter: parent.verticalCenter
-        width: 3; height: 3; radius: 1.5
-        color: Color.foreground
-        antialiasing: true
-      }
+      Connections { target: root; function onSizeChanged() { armPaint.requestPaint() } }
     }
   }
 }
