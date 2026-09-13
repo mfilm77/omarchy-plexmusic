@@ -55,11 +55,13 @@ Item {
           // width can still be 0 or briefly negative. A negative radius is a
           // hard error in Qt's 2D context, so bail out rather than draw.
           if (!(width > 0) || !(height > 0)) return
-          var ctx = getContext("2d")
-          ctx.reset()
           var c = width / 2
           var outer = Math.max(0, c * 0.985)
           var inner = Math.max(0, c * (root.labelRatio / 2) * 1.08)
+          // Math.max(0, NaN) is NaN, and a NaN radius is the same hard error.
+          if (!isFinite(outer) || !isFinite(inner) || inner > outer) return
+          var ctx = getContext("2d")
+          ctx.reset()
           // Groove pitch is not uniform on a real record; a slight variation
           // stops the rings reading as a moiré pattern on a screen.
           var rings = 78
@@ -198,19 +200,26 @@ Item {
 
   // ---- the tonearm ---------------------------------------------------------
   //
-  // Swings in over the record when the needle drops and lifts away when it
-  // stops. It tracks progress across the side, so the arm is where the music is.
+  // Based at the platter's top-right corner, as on a real deck. When a record
+  // is on it swings down onto the outer groove and creeps inward with the
+  // track; when there is nothing on, it lifts and parks along the top edge.
+  // `progress` is 0-1 through the current track.
   property real progress: 0
+  property bool engaged: false     // a record is on, paused or not
 
   Item {
     id: arm
-    width: root.size * 0.60
-    height: root.size * 0.055
-    // Pivots off the top-right, the way a real arm does.
-    x: platter.x + platter.width * 0.62
-    y: platter.y + platter.height * 0.04
+    readonly property real len: root.size * 0.52
+    width: len
+    height: root.size * 0.05
+    // The pivot is the arm's right end, sitting just outside the disc.
+    x: platter.x + platter.width * 1.02 - width
+    y: platter.y + platter.height * 0.02 - height / 2
     transformOrigin: Item.Right
-    rotation: root.spinning ? (34 - root.progress * 15) : 62
+    // Qt rotation is clockwise; the arm points left from its pivot, so a
+    // negative angle drops the headshell down onto the record. 12 degrees
+    // lands it on the outer groove, 30 puts it at the label.
+    rotation: root.engaged ? -(12 + root.progress * 18) : 4
     opacity: 0.95
 
     Behavior on rotation {

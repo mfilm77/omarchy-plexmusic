@@ -2,7 +2,8 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 
-// What is playing, in the bar. Click for the turntable.
+// What is playing, in the bar, with a small live meter beside it. Click for the
+// turntable.
 BarWidget {
   id: root
   moduleName: "io.github.mfilm77.plexmusic"
@@ -14,6 +15,8 @@ BarWidget {
 
   readonly property bool showTrack: setting("showTrack", true)
   readonly property int maxTrackChars: setting("maxTrackChars", 28)
+  readonly property bool showMeter: setting("showMeter", true)
+  readonly property int meterBars: setting("meterBars", 16)
   readonly property bool playing: service ? service.playing : false
   readonly property bool paused: service ? service.paused : false
 
@@ -51,12 +54,38 @@ BarWidget {
     }
   }
 
-  implicitWidth: button.implicitWidth
+  // The 64 cava bands folded down to a handful for the bar: each mini bar is
+  // the mean of its share of the full band, so the shape is the same as the
+  // panel's, just coarser.
+  readonly property var mini: {
+    try {
+      var lv = root.service ? root.service.levels : []
+      if (!lv || lv.length === 0) return []
+      var n = Math.max(4, root.meterBars)
+      var per = lv.length / n
+      var out = []
+      for (var i = 0; i < n; i++) {
+        var a = Math.floor(i * per), b = Math.max(a + 1, Math.floor((i + 1) * per))
+        var sum = 0
+        for (var j = a; j < b && j < lv.length; j++) sum += lv[j]
+        out.push(sum / (b - a))
+      }
+      return out
+    } catch (e) {
+      return []
+    }
+  }
+  readonly property bool meterLive: root.showMeter && !root.vertical
+    && root.playing && !root.paused && root.mini.length > 0
+
+  implicitWidth: button.implicitWidth + (meter.visible ? meter.width + 2 : 0)
   implicitHeight: root.vertical ? button.implicitHeight : root.barSize
 
   WidgetButton {
     id: button
-    anchors.fill: parent
+    anchors.left: parent.left
+    anchors.top: parent.top
+    anchors.bottom: parent.bottom
     bar: root.bar
     tooltipText: root.tooltip()
     dimmed: !root.playing
@@ -85,6 +114,56 @@ BarWidget {
         bar.shell.toggle(root.moduleName, "{}")
       else if (typeof bar.shell.summon === "function")
         bar.shell.summon(root.moduleName, "{}")
+    }
+  }
+
+  // The mini meter. Sits inside the widget's own footprint so it opens the
+  // panel like the text does, and disappears entirely when nothing is playing
+  // rather than leaving a flat line in the bar.
+  Item {
+    id: meter
+    anchors.left: button.right
+    anchors.leftMargin: 2
+    anchors.verticalCenter: parent.verticalCenter
+    visible: root.meterLive
+    readonly property int bars: root.mini.length
+    readonly property real barW: 2
+    readonly property real gap: 1
+    width: bars > 0 ? bars * (barW + gap) - gap + 8 : 0
+    height: Math.max(8, root.barSize - 12)
+
+    Row {
+      anchors.fill: parent
+      anchors.leftMargin: 4
+      anchors.rightMargin: 4
+      spacing: meter.gap
+
+      Repeater {
+        model: meter.bars
+        delegate: Item {
+          width: meter.barW
+          height: meter.height
+          readonly property real v: index < root.mini.length ? root.mini[index] : 0
+
+          Rectangle {
+            anchors.bottom: parent.bottom
+            width: parent.width
+            height: Math.max(1, parent.height * Math.min(1, v / 100))
+            radius: 0.5
+            // Loud bars tip into the theme's urgent colour, as in the panel.
+            color: v > 78 ? Color.urgent : (root.bar ? root.bar.barForeground : Color.accent)
+            opacity: v > 78 ? 1 : 0.85
+          }
+        }
+      }
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      onClicked: {
+        if (bar && bar.shell && typeof bar.shell.toggle === "function")
+          bar.shell.toggle(root.moduleName, "{}")
+      }
     }
   }
 }

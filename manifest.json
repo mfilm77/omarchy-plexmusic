@@ -41,6 +41,20 @@
         "label": "Track text width",
         "defaultValue": 28,
         "description": "How many characters of \"title — artist\" to show before it is cut short."
+      },
+      {
+        "key": "showMeter",
+        "type": "boolean",
+        "label": "Live meter in the bar",
+        "defaultValue": true,
+        "description": "Show a small spectrum meter beside the track while music is playing."
+      },
+      {
+        "key": "meterBars",
+        "type": "integer",
+        "label": "Meter bars",
+        "defaultValue": 16,
+        "description": "How many bars the bar meter has. The panel always shows all 64."
       }
     ]
   },

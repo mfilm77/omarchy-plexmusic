@@ -3,10 +3,11 @@
 Play your own music library from the Omarchy bar.
 
 A turntable with the real album cover on the label, a full-width spectrum
-analyser in your theme's colours, your starred artists one click away, and
-type-to-search across the whole library. Tracks come straight off your Plex
-server through mpv — direct play, no transcode, no Plex Pass, nothing via the
-cloud.
+analyser in your theme's colours, your starred artists one click away, the
+whole library browsable A–Z, and type-to-search across all of it. A small live
+meter sits beside the track in the bar while music plays. Tracks come straight
+off your Plex server through mpv — direct play, no transcode, no Plex Pass,
+nothing via the cloud.
 
 ![Plex Music](preview.png)
 
@@ -117,8 +118,15 @@ changing the replaygain mode.
 
 ## How it works
 
-- **Artists** are indexed once into `~/.local/share/omarchy-plex-music`, so
-  search is instant and offline rather than a round trip per keystroke.
+- **Artists** are indexed once into `~/.local/share/omarchy-plex-music`. The
+  panel loads that file into memory and searches it in QML, so typing never
+  waits on a process; the A–Z list is a virtualised view over the same array,
+  so thousands of artists scroll and jump without loading anything. The index
+  is in Plex's own sort order, which files "The Beatles" under B.
+- **Bar widget settings**: `showTrack`, `maxTrackChars`, `showMeter` and
+  `meterBars` (the bar meter folds the 64 cava bands down to that many; the
+  panel always shows all 64). The bar meter only appears while music is
+  sounding, and cava only runs then or while the panel is open.
 - **Playback** is an m3u of direct-play URLs handed to mpv, which is controlled
   over an IPC socket. ReplayGain is on, which evens out a library ripped over
   twenty years; it is a no-op on files with no tags.
@@ -142,6 +150,10 @@ changing the replaygain mode.
 - **Mangled characters in artist names.** Plex hands back whatever bytes are in
   the file tags, and an old library has tags that are not valid UTF-8. Those
   bytes are replaced rather than allowed to fail the whole index.
+- **Editing an open panel.** Omarchy hot-reloads a changed plugin, but a panel
+  that has already been opened keeps its compiled instance until the shell is
+  restarted (`omarchy-restart-shell` — *not* `omarchy-refresh-shell`, which
+  resets your whole bar layout). Bar widgets and the service do reload live.
 - **Play counts are not used.** On a large library Plex can report an identical
   `viewCount` for every artist, which makes "most played" meaningless. The
   starred list is curated by you for that reason.

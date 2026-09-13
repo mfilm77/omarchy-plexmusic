@@ -2,12 +2,14 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// Always-loaded state for the plugin: what is playing, the starred artists,
-// search results, and the spectrum frame the panel draws.
+// Always-loaded state for the plugin: what is playing, the whole artist index,
+// the starred artists, search results, and the spectrum frame the meters draw.
 //
 // None of the Plex or mpv work happens here. It all goes through `bin/plexmusic`,
 // which speaks JSON on stdout, because holding an HTTP session and an mpv IPC
 // socket open from QML would put the whole shell at the mercy of a slow server.
+// The one exception is search: the index is loaded into memory once and
+// filtered here, so typing never waits on a process.
 Item {
   id: root
 
@@ -22,21 +24,27 @@ Item {
     return u.indexOf("file://") === 0 ? u.substring(7) : u
   }
   readonly property string helper: pluginDir + "bin/plexmusic"
+  readonly property string home: Quickshell.env("HOME")
+  readonly property string indexPath: home + "/.local/share/omarchy-plex-music/artists.json"
 
   // ---- account + server ---------------------------------------------------
   property bool linked: false
   property string server: ""
-  property int artistCount: 0
   property string lastError: ""
-  // The link flow, while it is running.
   property string linkCode: ""
   property bool linking: false
+  property bool indexing: false
 
   // ---- library ------------------------------------------------------------
+  // Every artist, in Plex's own sort order (which files "The Beatles" under B).
+  // Each has key, title, fold (search key), letter (A-Z or #).
+  property var artists: []
+  readonly property int artistCount: artists.length
+  // First index of each letter, for the A-Z jump strip.
+  property var letterIndex: ({})
   property var favourites: []
   property var searchResults: []
   property string query: ""
-  property bool searching: false
 
   // ---- playback -----------------------------------------------------------
   property bool playing: false
@@ -52,12 +60,12 @@ Item {
   property bool shuffle: true
 
   // ---- spectrum -----------------------------------------------------------
-  // One frame of cava's raw output: `bars` values, each 0-100. The panel turns
-  // these into the meter band; nothing else reads them.
+  // One frame of cava's raw output: 64 values, each 0-100.
   property var levels: []
-  readonly property int barCount: 64
-  // cava is only worth running while something is looking at it.
+  // The panel asks for the meters while it is open; the bar's mini meter
+  // wants them whenever music is actually sounding. cava runs if either does.
   property bool spectrumWanted: false
+  readonly property bool cavaWanted: spectrumWanted || (playing && !paused)
 
   readonly property string label: {
     if (!playing) return "Plex Music"
@@ -66,11 +74,53 @@ Item {
   }
 
   function parse(text) {
-    try {
-      return JSON.parse(text)
-    } catch (e) {
-      return null
+    try { return JSON.parse(text) } catch (e) { return null }
+  }
+
+  // Lower-case, accents stripped, matching the helper's fold(). Used only on
+  // the typed query; the index arrives pre-folded.
+  function fold(s) {
+    s = String(s || "").toLowerCase()
+    try { s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, "") } catch (e) {}
+    return s
+  }
+
+  // ---- the index ----------------------------------------------------------
+
+  FileView {
+    id: indexFile
+    path: root.indexPath
+    watchChanges: true
+    onLoaded: root.applyIndex()
+    onFileChanged: reload()
+  }
+
+  function applyIndex() {
+    var d = root.parse(indexFile.text())
+    var list = (d && d.artists) ? d.artists : []
+    var idx = {}
+    for (var i = 0; i < list.length; i++) {
+      var l = list[i].letter || "#"
+      if (idx[l] === undefined) idx[l] = i
     }
+    root.artists = list
+    root.letterIndex = idx
+    if (root.query !== "") root.search(root.query)
+  }
+
+  function search(text) {
+    root.query = text || ""
+    var q = fold(root.query.trim())
+    if (q === "") { root.searchResults = []; return }
+    var starts = [], contains = []
+    var list = root.artists
+    for (var i = 0; i < list.length; i++) {
+      var k = list[i].fold || fold(list[i].title)
+      if (k.indexOf(q) === 0) starts.push(list[i])
+      else if (k.indexOf(q) >= 0) contains.push(list[i])
+      if (starts.length >= 100) break
+    }
+    root.searchResults = starts.concat(contains).slice(0, 100)
   }
 
   // ---- helper calls -------------------------------------------------------
@@ -84,15 +134,12 @@ Item {
         if (!d) return
         root.linked = !!d.linked
         root.server = d.server || ""
-        root.artistCount = d.artistCount || 0
       }
     }
   }
 
   Process {
     id: favProc
-    property string action: "list"
-    command: [root.helper, "favourites", action]
     stdout: StdioCollector {
       onStreamFinished: {
         var d = root.parse(text)
@@ -102,23 +149,11 @@ Item {
   }
 
   Process {
-    id: searchProc
-    stdout: StdioCollector {
-      onStreamFinished: {
-        var d = root.parse(text)
-        root.searching = false
-        root.searchResults = (d && d.results) ? d.results : []
-      }
-    }
-  }
-
-  Process {
     id: playProc
     stdout: StdioCollector {
       onStreamFinished: {
         var d = root.parse(text)
-        if (d && d.ok === false) root.lastError = d.error || "could not play that"
-        else root.lastError = ""
+        root.lastError = (d && d.ok === false) ? (d.error || "could not play that") : ""
         root.refreshNow()
       }
     }
@@ -161,8 +196,10 @@ Item {
     command: [root.helper, "index"]
     stdout: StdioCollector {
       onStreamFinished: {
+        root.indexing = false
         var d = root.parse(text)
-        if (d && d.artistCount) root.artistCount = d.artistCount
+        if (d && d.ok === false) root.lastError = d.error || "could not index"
+        // The FileView watches the index file and reloads it on its own.
         root.refreshStatus()
       }
     }
@@ -198,7 +235,7 @@ Item {
           root.refreshStatus()
           // A fresh account has no index yet; build it straight away so the
           // first search is not an empty list.
-          indexProc.running = true
+          root.reindex()
         }
       }
     }
@@ -208,8 +245,8 @@ Item {
     id: cavaProc
     running: false
     // cava prints one frame per line: 64 values 0-100 separated by ';'. At 60
-    // fps that is a line every 16 ms, so this parser must stay cheap — no
-    // allocation beyond the one array the panel binds to.
+    // fps that is a line every 16 ms, so this parser stays cheap — no
+    // allocation beyond the one array the meters bind to.
     stdout: SplitParser {
       splitMarker: "\n"
       onRead: function (line) {
@@ -230,19 +267,14 @@ Item {
 
   function refreshStatus() { statusProc.running = true }
   function refreshNow() { nowProc.running = true }
-  function refreshFavourites() { favProc.action = "list"; favProc.running = true }
-  function reindex() { indexProc.running = true }
-
-  function search(text) {
-    root.query = text
-    if (!text || text.trim() === "") {
-      root.searchResults = []
-      root.searching = false
-      searchDebounce.stop()
-      return
-    }
-    root.searching = true
-    searchDebounce.restart()
+  function refreshFavourites() {
+    favProc.command = [root.helper, "favourites", "list"]
+    favProc.running = true
+  }
+  function reindex() {
+    if (root.indexing) return
+    root.indexing = true
+    indexProc.running = true
   }
 
   function playArtist(key) {
@@ -272,8 +304,7 @@ Item {
 
   function toggleFavourite(key, title) {
     var fav = isFavourite(key)
-    var args = [root.helper, "favourites", fav ? "remove" : "add",
-                "--key", String(key)]
+    var args = [root.helper, "favourites", fav ? "remove" : "add", "--key", String(key)]
     if (!fav && title) { args.push("--title"); args.push(String(title)) }
     favProc.command = args
     favProc.running = true
@@ -292,19 +323,10 @@ Item {
 
   // ---- timers -------------------------------------------------------------
 
-  Timer {
-    id: searchDebounce
-    interval: 160
-    onTriggered: {
-      searchProc.command = [root.helper, "search", root.query, "--limit", "80"]
-      searchProc.running = true
-    }
-  }
-
   // Poll the player. Fast while the panel is up so the vinyl and the progress
-  // stay honest, slow in the background so the bar text is merely current.
+  // stay honest, slower in the background so the bar text is merely current.
   Timer {
-    interval: root.spectrumWanted ? 500 : 3000
+    interval: root.spectrumWanted ? 500 : 2000
     running: true
     repeat: true
     triggeredOnStart: true
@@ -319,12 +341,9 @@ Item {
   }
 
   // ---- spectrum -----------------------------------------------------------
-  //
-  // cava does the FFT and prints one line per frame: `bars` values 0-100
-  // separated by ';'. Running it only while the panel is open keeps an idle
-  // bar from costing anything.
-  onSpectrumWantedChanged: {
-    if (spectrumWanted) {
+
+  onCavaWantedChanged: {
+    if (cavaWanted) {
       cavaProc.command = ["cava", "-p", root.pluginDir + "share/cava.conf"]
       cavaProc.running = true
     } else {
@@ -337,26 +356,22 @@ Item {
     target: cavaProc
     function onExited(exitCode, exitStatus) {
       root.levels = []
-      // Most likely cava is not installed; say so once rather than silently
-      // showing a flat line forever.
-      if (root.spectrumWanted && exitCode !== 0)
+      // Most likely cava is not installed; say so rather than show a flat line.
+      if (root.cavaWanted && exitCode !== 0)
         root.lastError = "cava not available — install it for the spectrum meters"
     }
   }
 
   // Deliberately no IpcHandler here. A plugin-declared handler does not get
   // registered in this two-entry-point plugin model — the shell's own base
-  // panel type owns those targets. Bind keys to the helper instead, which needs
-  // no shell at all:
+  // panel type owns those targets. Bind keys to the helper instead:
   //
   //   .../plugins/io.github.mfilm77.plexmusic/bin/plexmusic cmd play-pause
-  //   .../plugins/io.github.mfilm77.plexmusic/bin/plexmusic cmd next
 
   Component.onCompleted: {
     refreshStatus()
     refreshFavourites()
   }
 
-  // The parser lives inside the cava Process so it is torn down with it.
   Component.onDestruction: cavaProc.running = false
 }

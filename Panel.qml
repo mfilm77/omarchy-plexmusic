@@ -260,6 +260,7 @@ PanelWindow {
           width: Math.max(0, Math.min(parent.width, parent.height - 130))
           height: width
           spinning: root.service ? (root.service.playing && !root.service.paused) : false
+          engaged: root.service ? root.service.playing : false
           art: root.service ? root.service.artPath : ""
           progress: root.service && root.service.duration > 0
             ? root.service.position / root.service.duration : 0
@@ -426,32 +427,135 @@ PanelWindow {
           }
         }
 
+        // Which list is showing when nothing is typed: the starred artists, or
+        // everything A-Z. Starts on the starred list once there is one.
+        property bool browseAll: root.service ? root.service.favourites.length === 0 : true
+        readonly property bool searchingNow: root.service ? root.service.query !== "" : false
+        readonly property bool showingAll: browseAll && !searchingNow
+
+        Row {
+          id: modeRow
+          anchors { top: searchBox.bottom; left: parent.left }
+          anchors.topMargin: 12
+          spacing: 6
+          visible: !side.searchingNow
+
+          ModeTab {
+            label: "Starred" + (root.service && root.service.favourites.length > 0
+              ? "  " + root.service.favourites.length : "")
+            on: !side.browseAll
+            onTapped: side.browseAll = false
+          }
+          ModeTab {
+            label: "All artists" + (root.service ? "  " + root.service.artistCount : "")
+            on: side.browseAll
+            onTapped: side.browseAll = true
+          }
+        }
+
         Text {
           id: listLabel
           anchors { top: searchBox.bottom; left: parent.left; right: parent.right }
-          anchors.topMargin: 14
-          text: {
-            if (!root.service) return ""
-            if (root.service.query !== "")
-              return root.service.searchResults.length + " matches"
-            var n = root.service.favourites.length
-            return n > 0 ? "Starred" : "No starred artists yet"
-          }
+          anchors.topMargin: 12
+          visible: side.searchingNow
+          height: modeRow.height
+          verticalAlignment: Text.AlignVCenter
+          text: root.service ? root.service.searchResults.length + " matches" : ""
           font.pixelSize: 10
           font.letterSpacing: 1.2
           color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.4)
         }
 
+        // The A-Z strip. Only for the full list; a search is already narrow.
+        Column {
+          id: alphabet
+          anchors { top: modeRow.bottom; right: parent.right; bottom: parent.bottom }
+          anchors.topMargin: 8
+          width: 16
+          visible: side.showingAll
+          readonly property var letters: ["#","A","B","C","D","E","F","G","H","I","J","K","L","M",
+                                          "N","O","P","Q","R","S","T","U","V","W","X","Y","Z"]
+          readonly property real slot: Math.max(1, height / letters.length)
+
+          Repeater {
+            model: alphabet.letters
+            delegate: Item {
+              width: alphabet.width
+              height: alphabet.slot
+              readonly property bool present: root.service
+                && root.service.letterIndex[modelData] !== undefined
+
+              Text {
+                anchors.centerIn: parent
+                text: modelData
+                font.pixelSize: Math.min(10, alphabet.slot * 0.8)
+                font.bold: jump.containsMouse
+                color: jump.containsMouse
+                  ? Color.accent
+                  : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b,
+                            present ? 0.5 : 0.15)
+              }
+
+              MouseArea {
+                id: jump
+                anchors.fill: parent
+                hoverEnabled: true
+                enabled: present
+                onClicked: {
+                  var i = root.service.letterIndex[modelData]
+                  if (i !== undefined) list.positionViewAtIndex(i, ListView.Beginning)
+                }
+              }
+            }
+          }
+        }
+
         ListView {
           id: list
-          anchors { top: listLabel.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
+          anchors { top: modeRow.bottom; left: parent.left; bottom: parent.bottom }
           anchors.topMargin: 8
+          anchors.right: side.showingAll ? alphabet.left : parent.right
+          anchors.rightMargin: side.showingAll ? 6 : 0
           clip: true
           spacing: 2
           boundsBehavior: Flickable.StopAtBounds
-          model: root.service
-            ? (root.service.query !== "" ? root.service.searchResults : root.service.favourites)
-            : []
+          // Every delegate is 34 px, so the view can jump to any of thousands
+          // of rows without measuring its way there.
+          reuseItems: true
+          cacheBuffer: 400
+          model: {
+            if (!root.service) return []
+            if (side.searchingNow) return root.service.searchResults
+            return side.browseAll ? root.service.artists : root.service.favourites
+          }
+
+          section.property: side.showingAll ? "letter" : ""
+          section.criteria: ViewSection.FullString
+          section.labelPositioning: ViewSection.InlineLabels | ViewSection.CurrentLabelAtStart
+          section.delegate: Item {
+            width: list.width
+            height: 26
+            Rectangle {
+              anchors.fill: parent
+              color: Color.popups.background
+            }
+            Text {
+              anchors.left: parent.left
+              anchors.leftMargin: 10
+              anchors.verticalCenter: parent.verticalCenter
+              text: section
+              font.pixelSize: 11
+              font.bold: true
+              font.letterSpacing: 1.5
+              color: Color.accent
+            }
+            Rectangle {
+              anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+              anchors.leftMargin: 10
+              height: 1
+              color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.25)
+            }
+          }
 
           ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
@@ -498,8 +602,10 @@ PanelWindow {
               anchors.right: parent.right
               anchors.rightMargin: 10
               anchors.verticalCenter: parent.verticalCenter
-              text: starred ? "󰓎" : "󰓏"
-              font.pixelSize: 14
+              // Plain Unicode stars: the Nerd Font star glyphs come out as
+              // circles in some of Omarchy's font choices.
+              text: starred ? "★" : "☆"
+              font.pixelSize: 15
               color: starred
                 ? Color.accent
                 : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b,
@@ -522,17 +628,24 @@ PanelWindow {
             width: parent.width - 40
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
-            visible: list.count === 0 && root.service && root.service.query === ""
-            text: "Search for an artist above, then tap the star to keep them here."
+            visible: list.count === 0 && !side.searchingNow && !side.browseAll
+            text: "Tap the star on any artist to keep them here."
             font.pixelSize: 11
             color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.35)
           }
 
           Text {
             anchors.centerIn: parent
-            visible: list.count === 0 && root.service && root.service.query !== ""
-              && !root.service.searching
+            visible: list.count === 0 && side.searchingNow
             text: "Nothing matches that."
+            font.pixelSize: 11
+            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.35)
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: list.count === 0 && side.showingAll
+            text: root.service && root.service.indexing ? "Indexing the library…" : "No index yet — press the rescan button above."
             font.pixelSize: 11
             color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.35)
           }
@@ -617,6 +730,42 @@ PanelWindow {
     ToolTip.visible: hover.containsMouse && toggle.tip !== ""
     ToolTip.text: toggle.tip
     ToolTip.delay: 450
+  }
+
+  component ModeTab: Rectangle {
+    id: tab
+    property string label: ""
+    property bool on: false
+    signal tapped()
+
+    implicitWidth: tabText.implicitWidth + 20
+    implicitHeight: 24
+    radius: 12
+    color: on
+      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.16)
+      : (tabHover.containsMouse
+         ? Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.08)
+         : "transparent")
+    border.width: 1
+    border.color: on
+      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.5)
+      : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
+
+    Text {
+      id: tabText
+      anchors.centerIn: parent
+      text: tab.label
+      font.pixelSize: 11
+      color: tab.on ? Color.accent
+                    : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.6)
+    }
+
+    MouseArea {
+      id: tabHover
+      anchors.fill: parent
+      hoverEnabled: true
+      onClicked: tab.tapped()
+    }
   }
 
   component TextBtn: Rectangle {

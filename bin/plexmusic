@@ -87,7 +87,12 @@ def write_json(path: str, data, mode: int = 0o600) -> None:
 def fold(text: str) -> str:
     """Case- and accent-insensitive key for matching artist names."""
     stripped = unicodedata.normalize("NFKD", text)
-    stripped = "".join(c for c in stripped if not unicodedata.combining(c))
+    # Drop combining marks (accents) and invisible characters. A byte-order
+    # mark or zero-width space at the front of a tag is common in old rips
+    # and would otherwise file "Evil Nine" under the symbol block twice.
+    stripped = "".join(
+        c for c in stripped
+        if not unicodedata.combining(c) and unicodedata.category(c) != "Cf")
     return stripped.casefold()
 
 
@@ -261,11 +266,25 @@ class Plex:
             container = data.get("MediaContainer", {})
             batch = container.get("Metadata") or []
             for m in batch:
+                title = m.get("title") or "<unknown>"
+                # Plex's own sort key already drops a leading "The", so the
+                # A-Z browse files The Beatles under B, as a record shop does.
+                # The letter must come from the key's FIRST character, not the
+                # first letter in it: Plex puts "!Deladap" in the symbol block
+                # at the top, and labelling it D would break the A-Z order.
+                sort_key = fold(m.get("titleSort") or title).lstrip()
+                first = sort_key[:1] or "#"
                 artists.append({
                     "key": str(m.get("ratingKey")),
-                    "title": m.get("title") or "<unknown>",
+                    "title": title,
                     "thumb": m.get("thumb") or "",
                     "albums": m.get("childCount") or 0,
+                    # Pre-folded so the panel can search in QML without a
+                    # process per keystroke, and without needing Unicode
+                    # normalisation in the QML engine.
+                    "fold": fold(title),
+                    # A-Z only; digits and non-Latin initials file under #.
+                    "letter": first.upper() if "a" <= first <= "z" else "#",
                 })
             total = container.get("totalSize", len(artists))
             start += len(batch)
@@ -593,7 +612,7 @@ def cmd_search(args) -> None:
     artists = load_index()
     starts, contains = [], []
     for a in artists:
-        key = a.get("_fold") or fold(a["title"])
+        key = a.get("fold") or fold(a["title"])
         if key.startswith(query):
             starts.append(a)
         elif query in key:
