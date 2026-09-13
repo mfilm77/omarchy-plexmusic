@@ -1,0 +1,14 @@
+# Nothing generated at runtime belongs in this repo, and two of these files
+# hold a Plex token. They live in ~/.config and ~/.cache on the machine that
+# was linked; they must never reach a commit.
+auth.json
+settings.json
+favourites.json
+pending-pin.json
+artists.json
+queue.json
+queue.m3u
+*.token
+
+__pycache__/
+*.pyc

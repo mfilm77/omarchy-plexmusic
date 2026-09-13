@@ -1,0 +1,841 @@
+#!/usr/bin/env python3
+"""plexmusic — the playback engine behind the Omarchy Plex Music plugin.
+
+Talks to a Plex Media Server over HTTP, keeps a local artist index, and plays
+tracks through mpv (direct play, no transcode). The QML plugin shells out to
+this; nothing here needs Quickshell, so it is testable on its own.
+
+Everything is JSON on stdout so QML can parse it without a shell pipeline.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+
+HOME = os.path.expanduser("~")
+CONFIG_DIR = os.path.join(HOME, ".config", "omarchy-plex-music")
+DATA_DIR = os.path.join(HOME, ".local", "share", "omarchy-plex-music")
+AUTH_FILE = os.path.join(CONFIG_DIR, "auth.json")
+SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
+FAVOURITES_FILE = os.path.join(CONFIG_DIR, "favourites.json")
+ARTISTS_FILE = os.path.join(DATA_DIR, "artists.json")
+QUEUE_FILE = os.path.join(DATA_DIR, "queue.json")
+PLAYLIST_FILE = os.path.join(DATA_DIR, "queue.m3u")
+CACHE_DIR = os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache"),
+    "omarchy-plex-music",
+)
+ART_DIR = os.path.join(CACHE_DIR, "art")
+
+RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+IPC_SOCKET = os.path.join(RUNTIME_DIR, "omarchy-plexmusic.sock")
+
+PLEX_TV = "https://plex.tv"
+PLEX_PRODUCT = "Omarchy Plex Music"
+PLEX_VERSION = "0.1.0"
+PLEX_PLATFORM = "Linux"
+
+# No server addresses are baked in. They come from one of two places, in this
+# order: addresses the user typed in (settings.json "servers" — that is how a
+# Tailscale address gets used, since plex.tv does not advertise tailnet IPs),
+# then whatever plex.tv reports for the linked account.
+
+
+# --------------------------------------------------------------------------- #
+# small helpers
+# --------------------------------------------------------------------------- #
+
+def die(message: str, code: int = 1) -> "NoReturn":  # type: ignore[name-defined]
+    json.dump({"ok": False, "error": message}, sys.stdout)
+    sys.stdout.write("\n")
+    sys.exit(code)
+
+
+def emit(payload: dict) -> None:
+    payload.setdefault("ok", True)
+    json.dump(payload, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+def read_json(path: str, default):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path: str, data, mode: int = 0o600) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def fold(text: str) -> str:
+    """Case- and accent-insensitive key for matching artist names."""
+    stripped = unicodedata.normalize("NFKD", text)
+    stripped = "".join(c for c in stripped if not unicodedata.combining(c))
+    return stripped.casefold()
+
+
+# --------------------------------------------------------------------------- #
+# Plex
+# --------------------------------------------------------------------------- #
+
+def client_identifier() -> str:
+    """A stable per-install id. Created on first use, never shipped."""
+    auth = read_json(AUTH_FILE, {})
+    cid = auth.get("clientIdentifier")
+    if not cid:
+        import uuid
+        cid = str(uuid.uuid4())
+        auth["clientIdentifier"] = cid
+        write_json(AUTH_FILE, auth)
+    return cid
+
+
+def plex_tv_headers(client_id: str, token: str | None = None) -> dict:
+    headers = {
+        "Accept": "application/json",
+        "X-Plex-Product": PLEX_PRODUCT,
+        "X-Plex-Version": PLEX_VERSION,
+        "X-Plex-Platform": PLEX_PLATFORM,
+        "X-Plex-Device": "Omarchy",
+        "X-Plex-Client-Identifier": client_id,
+    }
+    if token:
+        headers["X-Plex-Token"] = token
+    return headers
+
+
+def plex_tv_request(path: str, client_id: str, token: str | None = None,
+                    method: str = "GET", timeout: float = 20.0) -> dict:
+    req = urllib.request.Request(
+        PLEX_TV + path, headers=plex_tv_headers(client_id, token), method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    if not raw:
+        return {}
+    return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+class Plex:
+    def __init__(self) -> None:
+        auth = read_json(AUTH_FILE, {})
+        self.token = auth.get("authToken")
+        self.client_id = auth.get("clientIdentifier") or "omarchy-plex-music"
+        if not self.token:
+            die("not linked to Plex — run `plexmusic link` first", code=2)
+        self.settings = read_json(SETTINGS_FILE, {})
+        self.base = self.settings.get("baseUrl")
+        self.section = str(self.settings.get("musicSection") or "")
+
+    # -- transport ---------------------------------------------------------- #
+
+    def headers(self) -> dict:
+        return {
+            "X-Plex-Token": self.token,
+            "X-Plex-Client-Identifier": self.client_id,
+            "X-Plex-Product": PLEX_PRODUCT,
+            "X-Plex-Version": PLEX_VERSION,
+            "Accept": "application/json",
+        }
+
+    def get(self, path: str, params: dict | None = None, base: str | None = None,
+            timeout: float = 15.0) -> dict:
+        base = base or self.resolve_base()
+        url = base + path
+        if params:
+            url += ("&" if "?" in path else "?") + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers=self.headers())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+        # This library is full of old rips whose tags are not valid UTF-8, and
+        # Plex hands those bytes straight back. Replace rather than crash — one
+        # mangled character in one artist name must not kill the whole index.
+        return json.loads(raw.decode("utf-8", errors="replace"))
+
+    def reachable(self, base: str, timeout: float = 2.5) -> float | None:
+        """Return round-trip seconds if this server answers, else None."""
+        req = urllib.request.Request(base + "/identity", headers=self.headers())
+        start = time.monotonic()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return time.monotonic() - start
+        except Exception:
+            return None
+        return None
+
+    def discover(self) -> list[dict]:
+        """Every address we could try, best-first, with where it came from.
+
+        Manually configured addresses win, because that is the only way a
+        Tailscale address can be used — plex.tv never advertises tailnet IPs.
+        """
+        candidates: list[dict] = []
+        seen: set[str] = set()
+
+        def add(uri: str, source: str, name: str = "", local: bool = False,
+                relay: bool = False) -> None:
+            uri = (uri or "").rstrip("/")
+            if not uri or uri in seen:
+                return
+            seen.add(uri)
+            candidates.append({"uri": uri, "source": source, "name": name,
+                               "local": local, "relay": relay})
+
+        for uri in self.settings.get("servers") or []:
+            add(uri, "manual", local=True)
+
+        try:
+            resources = plex_tv_request(
+                "/api/v2/resources?includeHttps=1&includeRelay=1",
+                self.client_id, self.token)
+        except Exception:
+            resources = []
+        if isinstance(resources, list):
+            direct, relayed = [], []
+            for dev in resources:
+                if "server" not in (dev.get("provides") or ""):
+                    continue
+                name = dev.get("name") or ""
+                for conn in dev.get("connections") or []:
+                    entry = (conn.get("uri"), name, bool(conn.get("local")),
+                             bool(conn.get("relay")))
+                    (relayed if conn.get("relay") else direct).append(entry)
+            # Local addresses before remote, and Plex's slow relay dead last.
+            direct.sort(key=lambda e: not e[2])
+            for uri, name, local, relay in direct + relayed:
+                add(uri, "plex.tv", name, local, relay)
+        return candidates
+
+    def resolve_base(self, force: bool = False) -> str:
+        """Pick a server that actually answers, preferring the cached one."""
+        if self.base and not force and self.reachable(self.base) is not None:
+            return self.base
+        for cand in self.discover():
+            if self.reachable(cand["uri"]) is not None:
+                self.base = cand["uri"]
+                self.settings["baseUrl"] = cand["uri"]
+                write_json(SETTINGS_FILE, self.settings)
+                return cand["uri"]
+        die("no Plex server reachable — add an address with "
+            "`plexmusic server --add http://host:32400`", code=3)
+
+    # -- library ------------------------------------------------------------ #
+
+    def find_music_section(self) -> str:
+        data = self.get("/library/sections")
+        for d in data.get("MediaContainer", {}).get("Directory", []):
+            if d.get("type") == "artist" and d.get("title", "").lower() == "music":
+                return str(d.get("key"))
+        # No section literally called Music — take the first artist section.
+        for d in data.get("MediaContainer", {}).get("Directory", []):
+            if d.get("type") == "artist":
+                return str(d.get("key"))
+        die("no music (artist) library section found on this Plex server")
+
+    def all_artists(self, page: int = 1000) -> list[dict]:
+        artists: list[dict] = []
+        start = 0
+        while True:
+            data = self.get(
+                f"/library/sections/{self.section}/all",
+                {"type": 8, "X-Plex-Container-Start": start,
+                 "X-Plex-Container-Size": page},
+            )
+            container = data.get("MediaContainer", {})
+            batch = container.get("Metadata") or []
+            for m in batch:
+                artists.append({
+                    "key": str(m.get("ratingKey")),
+                    "title": m.get("title") or "<unknown>",
+                    "thumb": m.get("thumb") or "",
+                    "albums": m.get("childCount") or 0,
+                })
+            total = container.get("totalSize", len(artists))
+            start += len(batch)
+            if not batch or start >= total:
+                break
+        return artists
+
+    def artist_tracks(self, rating_key: str) -> list[dict]:
+        data = self.get(f"/library/metadata/{rating_key}/allLeaves")
+        tracks: list[dict] = []
+        for m in data.get("MediaContainer", {}).get("Metadata", []) or []:
+            part = None
+            for media in m.get("Media", []) or []:
+                for p in media.get("Part", []) or []:
+                    if p.get("key"):
+                        part = p
+                        break
+                if part:
+                    break
+            if not part:
+                continue
+            tracks.append({
+                "key": str(m.get("ratingKey")),
+                "title": m.get("title") or "",
+                "album": m.get("parentTitle") or "",
+                "artist": m.get("grandparentTitle") or m.get("originalTitle") or "",
+                "duration": int(m.get("duration") or 0),
+                "part": part["key"],
+                # The vinyl label art. Album cover first, artist shot as the
+                # fallback — 94% of albums here have a cover, 83% of artists do.
+                "albumKey": str(m.get("parentRatingKey") or ""),
+                "albumThumb": m.get("parentThumb") or m.get("grandparentThumb") or "",
+            })
+        return tracks
+
+    def stream_url(self, part_key: str) -> str:
+        base = self.base or self.resolve_base()
+        return f"{base}{part_key}?X-Plex-Token={urllib.parse.quote(self.token)}"
+
+    # -- artwork ------------------------------------------------------------ #
+
+    def art_path(self, thumb: str, size: int = 500) -> str | None:
+        """Cache a Plex thumb locally and return its path. None if no art."""
+        if not thumb:
+            return None
+        # Plex thumb paths end in a version number, so the cache key changes
+        # when the artwork changes and stale covers cannot stick around.
+        slug = thumb.strip("/").replace("/", "_")
+        target = os.path.join(ART_DIR, f"{slug}_{size}.jpg")
+        if os.path.exists(target) and os.path.getsize(target) > 0:
+            return target
+        base = self.base or self.resolve_base()
+        query = urllib.parse.urlencode({
+            "width": size, "height": size, "minSize": 1, "upscale": 1,
+            "url": thumb, "X-Plex-Token": self.token,
+        })
+        url = f"{base}/photo/:/transcode?{query}"
+        os.makedirs(ART_DIR, exist_ok=True)
+        try:
+            req = urllib.request.Request(url, headers=self.headers())
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = resp.read()
+            if not data:
+                return None
+            tmp = target + ".tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, target)
+            return target
+        except Exception:
+            return None
+
+
+# --------------------------------------------------------------------------- #
+# mpv
+# --------------------------------------------------------------------------- #
+
+def mpv_request(command: list, timeout: float = 1.5):
+    """Send one IPC command to a running mpv. Returns None if mpv is not up."""
+    if not os.path.exists(IPC_SOCKET):
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(IPC_SOCKET)
+            sock.sendall((json.dumps({"command": command}) + "\n").encode("utf-8"))
+            buffer = b""
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buffer += chunk
+                for line in buffer.split(b"\n"):
+                    if not line.strip():
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    # Ignore async events; we want the reply to our command.
+                    if "error" in msg:
+                        return msg
+                if buffer.endswith(b"\n"):
+                    break
+    except (OSError, socket.timeout):
+        return None
+    return None
+
+
+def mpv_get(prop: str):
+    reply = mpv_request(["get_property", prop])
+    if reply and reply.get("error") == "success":
+        return reply.get("data")
+    return None
+
+
+def mpv_running() -> bool:
+    return mpv_get("idle-active") is not None or mpv_get("pid") is not None
+
+
+def mpv_stop() -> None:
+    mpv_request(["quit"])
+    for _ in range(20):
+        if not os.path.exists(IPC_SOCKET):
+            return
+        time.sleep(0.05)
+    try:
+        os.unlink(IPC_SOCKET)
+    except OSError:
+        pass
+
+
+def mpv_launch(playlist_path: str, shuffle: bool) -> None:
+    mpv_stop()
+    args = [
+        "mpv",
+        "--no-video",
+        "--audio-display=no",
+        "--gapless-audio=yes",
+        "--no-terminal",
+        "--idle=no",
+        "--force-window=no",
+        f"--input-ipc-server={IPC_SOCKET}",
+        f"--playlist={playlist_path}",
+        # Plex serves the original file untouched — direct play, no transcode.
+        "--cache=yes",
+        "--demuxer-max-bytes=64MiB",
+        # Levels out a library ripped over 20 years. A no-op on files with no
+        # ReplayGain tags, which is most of an old collection.
+        "--replaygain=track",
+    ]
+    if shuffle:
+        args.append("--shuffle")
+    # Escape hatch for output device, replaygain mode, filters, etc.
+    extra = os.environ.get("PLEXMUSIC_MPV_ARGS", "").strip()
+    if extra:
+        import shlex
+        args.extend(shlex.split(extra))
+    subprocess.Popen(
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# commands
+# --------------------------------------------------------------------------- #
+
+PENDING_PIN_FILE = os.path.join(DATA_DIR, "pending-pin.json")
+
+
+def cmd_link(args) -> None:
+    """The plex.tv link flow: show a 4-character code, then poll for a token.
+
+    Nothing but the user's own browser ever sees their Plex password.
+    """
+    cid = client_identifier()
+
+    if args.action == "start":
+        pin = plex_tv_request("/api/v2/pins", cid, method="POST")
+        if not pin.get("code"):
+            die("Plex did not issue a link code")
+        write_json(PENDING_PIN_FILE, {"id": pin["id"], "code": pin["code"],
+                                      "expiresAt": pin.get("expiresAt")})
+        emit({"code": pin["code"], "pinId": pin["id"],
+              "url": "https://plex.tv/link", "expiresAt": pin.get("expiresAt")})
+        return
+
+    if args.action == "poll":
+        pending = read_json(PENDING_PIN_FILE, {})
+        if not pending.get("id"):
+            die("no link in progress — run `plexmusic link start` first")
+        result = plex_tv_request(f"/api/v2/pins/{pending['id']}", cid)
+        token = result.get("authToken")
+        if not token:
+            emit({"linked": False, "code": pending.get("code"),
+                  "expiresAt": pending.get("expiresAt")})
+            return
+        auth = read_json(AUTH_FILE, {})
+        auth.update({"authToken": token, "clientIdentifier": cid,
+                     "product": PLEX_PRODUCT, "linkedAt": int(time.time())})
+        write_json(AUTH_FILE, auth)
+        try:
+            os.unlink(PENDING_PIN_FILE)
+        except OSError:
+            pass
+        emit({"linked": True})
+        return
+
+    if args.action == "status":
+        auth = read_json(AUTH_FILE, {})
+        emit({"linked": bool(auth.get("authToken")),
+              "linkedAt": auth.get("linkedAt")})
+        return
+
+    if args.action == "forget":
+        # Wipe every trace of the account from this machine.
+        for path in (AUTH_FILE, PENDING_PIN_FILE, SETTINGS_FILE,
+                     ARTISTS_FILE, QUEUE_FILE, PLAYLIST_FILE):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        emit({"linked": False, "forgotten": True})
+        return
+
+    die(f"unknown link action: {args.action}")
+
+
+def cmd_server(args) -> None:
+    """List, add or pin the Plex address — the manual path for Tailscale."""
+    settings = read_json(SETTINGS_FILE, {})
+    servers = settings.get("servers") or []
+
+    if args.add:
+        uri = args.add.rstrip("/")
+        if not uri.startswith(("http://", "https://")):
+            die("address must start with http:// or https://")
+        if uri not in servers:
+            servers.insert(0, uri)
+        settings["servers"] = servers
+        # Force a re-probe so a newly added address is picked up immediately.
+        settings.pop("baseUrl", None)
+        write_json(SETTINGS_FILE, settings)
+        plex = Plex()
+        base = plex.resolve_base(force=True)
+        emit({"servers": servers, "active": base})
+        return
+
+    if args.remove:
+        servers = [s for s in servers if s.rstrip("/") != args.remove.rstrip("/")]
+        settings["servers"] = servers
+        settings.pop("baseUrl", None)
+        write_json(SETTINGS_FILE, settings)
+        emit({"servers": servers})
+        return
+
+    plex = Plex()
+    found = plex.discover()
+    for cand in found:
+        rtt = plex.reachable(cand["uri"], timeout=2.0)
+        cand["reachable"] = rtt is not None
+        cand["ms"] = round(rtt * 1000, 1) if rtt is not None else None
+    emit({"servers": found, "active": settings.get("baseUrl")})
+
+
+def cmd_art(args) -> None:
+    plex = Plex()
+    plex.resolve_base()
+    path = plex.art_path(args.thumb, size=args.size)
+    if not path:
+        die("no artwork available for that item")
+    emit({"path": path})
+
+
+def cmd_status(args) -> None:
+    auth = read_json(AUTH_FILE, {})
+    settings = read_json(SETTINGS_FILE, {})
+    index = read_json(ARTISTS_FILE, {})
+    payload = {
+        "linked": bool(auth.get("authToken")),
+        "server": settings.get("baseUrl"),
+        "section": settings.get("musicSection"),
+        "artistCount": len(index.get("artists", [])),
+        "indexedAt": index.get("indexedAt"),
+        "favourites": len(read_json(FAVOURITES_FILE, {"items": []}).get("items", [])),
+        "playing": mpv_running(),
+    }
+    emit(payload)
+
+
+def cmd_index(args) -> None:
+    plex = Plex()
+    plex.resolve_base(force=True)
+    if not read_json(SETTINGS_FILE, {}).get("musicSection"):
+        plex.section = plex.find_music_section()
+        plex.settings["musicSection"] = plex.section
+        write_json(SETTINGS_FILE, plex.settings)
+    artists = plex.all_artists()
+    write_json(ARTISTS_FILE, {
+        "indexedAt": int(time.time()),
+        "server": plex.base,
+        "section": plex.section,
+        "artists": artists,
+    }, mode=0o644)
+    emit({"artistCount": len(artists), "server": plex.base, "section": plex.section})
+
+
+def load_index() -> list[dict]:
+    index = read_json(ARTISTS_FILE, None)
+    if not index or not index.get("artists"):
+        die("artist index is empty — run `plexmusic index` first")
+    return index["artists"]
+
+
+def cmd_search(args) -> None:
+    query = fold(args.query.strip())
+    if not query:
+        emit({"results": []})
+        return
+    artists = load_index()
+    starts, contains = [], []
+    for a in artists:
+        key = a.get("_fold") or fold(a["title"])
+        if key.startswith(query):
+            starts.append(a)
+        elif query in key:
+            contains.append(a)
+        if len(starts) >= args.limit:
+            break
+    results = (starts + contains)[: args.limit]
+    emit({"results": results, "query": args.query})
+
+
+def cmd_favourites(args) -> None:
+    store = read_json(FAVOURITES_FILE, {"items": []})
+    items = store.get("items", [])
+
+    if args.action == "list":
+        emit({"items": items})
+        return
+
+    if args.action == "add":
+        if not args.key:
+            die("favourites add needs --key")
+        if any(i["key"] == args.key for i in items):
+            emit({"items": items, "added": False})
+            return
+        title = args.title
+        if not title:
+            for a in load_index():
+                if a["key"] == args.key:
+                    title = a["title"]
+                    break
+        items.append({"key": args.key, "title": title or args.key})
+        write_json(FAVOURITES_FILE, {"items": items})
+        emit({"items": items, "added": True})
+        return
+
+    if args.action == "remove":
+        items = [i for i in items if i["key"] != args.key]
+        write_json(FAVOURITES_FILE, {"items": items})
+        emit({"items": items, "removed": True})
+        return
+
+    if args.action == "move":
+        # Reorder the curated list: move --key to --position (0-based).
+        idx = next((n for n, i in enumerate(items) if i["key"] == args.key), None)
+        if idx is None:
+            die("that artist is not in favourites")
+        item = items.pop(idx)
+        pos = max(0, min(len(items), args.position))
+        items.insert(pos, item)
+        write_json(FAVOURITES_FILE, {"items": items})
+        emit({"items": items, "moved": True})
+        return
+
+    die(f"unknown favourites action: {args.action}")
+
+
+def cmd_play(args) -> None:
+    plex = Plex()
+    plex.resolve_base()
+    tracks = plex.artist_tracks(args.key)
+    if not tracks:
+        die("that artist has no playable tracks")
+
+    lines = ["#EXTM3U"]
+    for t in tracks:
+        seconds = int((t["duration"] or 0) / 1000)
+        label = f"{t['artist']} - {t['title']}" if t["artist"] else t["title"]
+        lines.append(f"#EXTINF:{seconds},{label}")
+        lines.append(plex.stream_url(t["part"]))
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = PLAYLIST_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    # The playlist embeds the Plex token in every URL — keep it owner-only.
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, PLAYLIST_FILE)
+
+    # `part` stays in the queue: with --shuffle mpv reorders its own playlist,
+    # so the only reliable way to know what is playing is to match mpv's
+    # current path back to a track. The file is 0600 for the same reason the
+    # playlist is — these URLs carry the token.
+    write_json(QUEUE_FILE, {
+        "startedAt": int(time.time()),
+        "artistKey": args.key,
+        "shuffle": bool(args.shuffle),
+        "tracks": tracks,
+    })
+
+    mpv_launch(PLAYLIST_FILE, shuffle=args.shuffle)
+    # Warm the first cover so the panel has art to show immediately.
+    first_art = None
+    if tracks:
+        first_art = plex.art_path(tracks[0].get("albumThumb", ""))
+    emit({"trackCount": len(tracks), "artistKey": args.key,
+          "shuffle": bool(args.shuffle), "art": first_art})
+
+
+def cmd_cmd(args) -> None:
+    action = args.action
+    if action == "play-pause":
+        mpv_request(["cycle", "pause"])
+    elif action == "play":
+        mpv_request(["set_property", "pause", False])
+    elif action == "pause":
+        mpv_request(["set_property", "pause", True])
+    elif action == "next":
+        mpv_request(["playlist-next", "force"])
+    elif action == "prev":
+        mpv_request(["playlist-prev", "force"])
+    elif action == "stop":
+        mpv_stop()
+    elif action == "volume":
+        if args.value is None:
+            die("volume needs --value 0-130")
+        mpv_request(["set_property", "volume", float(args.value)])
+    else:
+        die(f"unknown command: {action}")
+    emit({"action": action})
+
+
+def cmd_now(args) -> None:
+    if not mpv_running():
+        emit({"playing": False})
+        return
+    pos = mpv_get("playlist-pos")
+    queue = read_json(QUEUE_FILE, {})
+    tracks = queue.get("tracks", [])
+
+    # Match mpv's current path back to our queue by part key. This works
+    # whether or not --shuffle has reordered mpv's playlist, which indexing
+    # by playlist-pos does not.
+    path = mpv_get("path") or ""
+    entry: dict = {}
+    if path:
+        for track in tracks:
+            if track.get("part") and track["part"] in path:
+                entry = track
+                break
+    if not entry and isinstance(pos, int) and 0 <= pos < len(tracks) \
+            and not queue.get("shuffle"):
+        entry = tracks[pos]
+
+    # File tags are the truth for what is sounding; the queue fills the gaps
+    # left by untagged rips.
+    meta = mpv_get("metadata") or {}
+    meta = {str(k).lower(): v for k, v in meta.items()} if isinstance(meta, dict) else {}
+
+    art = None
+    thumb = entry.get("albumThumb") or ""
+    if thumb:
+        slug = thumb.strip("/").replace("/", "_")
+        cached = os.path.join(ART_DIR, f"{slug}_500.jpg")
+        if os.path.exists(cached):
+            art = cached
+        elif not args.no_fetch:
+            try:
+                plex = Plex()
+                plex.resolve_base()
+                art = plex.art_path(thumb)
+            except SystemExit:
+                art = None
+
+    emit({
+        "playing": True,
+        "paused": bool(mpv_get("pause")),
+        "title": meta.get("title") or entry.get("title") or mpv_get("media-title") or "",
+        "artist": meta.get("artist") or entry.get("artist") or "",
+        "album": meta.get("album") or entry.get("album") or "",
+        "art": art,
+        "position": mpv_get("time-pos") or 0,
+        "duration": mpv_get("duration") or 0,
+        "volume": mpv_get("volume") or 0,
+        "playlistPos": pos,
+        "playlistCount": mpv_get("playlist-count") or 0,
+    })
+
+
+# --------------------------------------------------------------------------- #
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="plexmusic", description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("status").set_defaults(func=cmd_status)
+
+    p = sub.add_parser("link", help="link this machine to a Plex account")
+    p.add_argument("action", choices=["start", "poll", "status", "forget"])
+    p.set_defaults(func=cmd_link)
+
+    p = sub.add_parser("server", help="list/add Plex addresses (incl. Tailscale)")
+    p.add_argument("--add", metavar="URL",
+                   help="a Plex address, e.g. a LAN host or a VPN address such "
+                        "as http://100.64.0.10:32400 on a Tailscale tailnet")
+    p.add_argument("--remove")
+    p.set_defaults(func=cmd_server)
+
+    p = sub.add_parser("art")
+    p.add_argument("thumb", help="Plex thumb path from a track or artist")
+    p.add_argument("--size", type=int, default=500)
+    p.set_defaults(func=cmd_art)
+
+    p = sub.add_parser("index")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_index)
+
+    p = sub.add_parser("search")
+    p.add_argument("query")
+    p.add_argument("--limit", type=int, default=60)
+    p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("favourites")
+    p.add_argument("action", choices=["list", "add", "remove", "move"])
+    p.add_argument("--key")
+    p.add_argument("--title")
+    p.add_argument("--position", type=int, default=0)
+    p.set_defaults(func=cmd_favourites)
+
+    p = sub.add_parser("play")
+    p.add_argument("--key", required=True, help="artist ratingKey")
+    p.add_argument("--shuffle", action="store_true")
+    p.set_defaults(func=cmd_play)
+
+    p = sub.add_parser("cmd")
+    p.add_argument("action", choices=["play-pause", "play", "pause", "next",
+                                      "prev", "stop", "volume"])
+    p.add_argument("--value", type=float)
+    p.set_defaults(func=cmd_cmd)
+
+    p = sub.add_parser("now")
+    p.add_argument("--no-fetch", action="store_true",
+                   help="use cached artwork only, never hit the server")
+    p.set_defaults(func=cmd_now)
+
+    args = parser.parse_args()
+    try:
+        args.func(args)
+    except urllib.error.HTTPError as exc:
+        die(f"Plex returned HTTP {exc.code} for {exc.url}")
+    except urllib.error.URLError as exc:
+        die(f"cannot reach Plex: {exc.reason}")
+
+
+if __name__ == "__main__":
+    main()

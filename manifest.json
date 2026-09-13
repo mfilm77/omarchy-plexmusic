@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.mfilm77.plexmusic",
+  "name": "Plex Music",
+  "version": "0.1.0",
+  "author": "mfilm",
+  "license": "MIT",
+  "description": "Play your own Plex music library from the bar: a turntable with the real album cover on the label, a full-width spectrum analyser, your starred artists one click away, and type-to-search across the whole library. Direct play through mpv — no transcode, no Plex Pass, no cloud. Works on the LAN or over a VPN such as Tailscale.",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Plex Music",
+    "description": "Shows what is playing from your Plex library; click for the turntable, your starred artists and search.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showTrack": true,
+      "maxTrackChars": 28
+    },
+    "schema": [
+      {
+        "key": "showTrack",
+        "type": "boolean",
+        "label": "Show the track in the bar",
+        "defaultValue": true,
+        "description": "Show title and artist next to the icon, not just the icon."
+      },
+      {
+        "key": "maxTrackChars",
+        "type": "integer",
+        "label": "Track text width",
+        "defaultValue": 28,
+        "description": "How many characters of \"title — artist\" to show before it is cut short."
+      }
+    ]
+  },
+  "repository": "https://github.com/mfilm77/omarchy-plexmusic"
+}
