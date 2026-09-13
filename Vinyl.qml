@@ -23,9 +23,12 @@ Item {
 
   Item {
     id: platter
-    width: root.size
-    height: root.size
-    anchors.centerIn: parent
+    // The platter takes the left 84% of the item; the arm's bearing sits in
+    // the strip to its right, as it does on a deck.
+    width: root.size * 0.84
+    height: width
+    x: 0
+    anchors.verticalCenter: parent.verticalCenter
 
     // Everything that must turn with the record lives in here.
     Item {
@@ -49,6 +52,7 @@ Item {
       Canvas {
         id: grooves
         anchors.fill: parent
+        antialiasing: true
         renderStrategy: Canvas.Cooperative
         onPaint: {
           // Canvas paints once before the panel has been laid out, when the
@@ -91,6 +95,13 @@ Item {
         width: root.labelSize
         height: root.labelSize
         anchors.centerIn: parent
+        // The whole label — cover, mask and ring — is rendered into one
+        // multisampled layer, so its edge stays smooth as the record turns.
+        layer.enabled: true
+        layer.smooth: true
+        layer.samples: 4
+        layer.textureSize: Qt.size(Math.max(2, Math.round(width * 2)),
+                                   Math.max(2, Math.round(height * 2)))
 
         Rectangle {
           anchors.fill: parent
@@ -213,66 +224,218 @@ Item {
 
   // ---- the tonearm ---------------------------------------------------------
   //
-  // Based at the platter's top-right corner, as on a real deck. When a record
-  // is on it swings down onto the outer groove and creeps inward with the
-  // track; when there is nothing on, it lifts and parks along the top edge.
-  // `progress` is 0-1 through the current track.
+  // A pivoting arm as a deck has it: bearing housing at the top-right of the
+  // platter, a counterweight behind the pivot, a tube out to an angled
+  // headshell carrying the cartridge and stylus. An arm rest sits to the right
+  // of the platter and the arm parks on it when nothing is on.
+  //
+  // `progress` is 0-1 through the whole side — first track at the outermost
+  // groove, last track at the label — and `engaged` is whether a record is on.
   property real progress: 0
-  property bool engaged: false     // a record is on, paused or not
+  property bool engaged: false
+
+  // Pivot and length, in platter units, solved so the stylus arc crosses the
+  // outermost groove in the upper right of the record and reaches the label
+  // edge 28 degrees later — the diagonal sweep of a real arm seen from above.
+  // At the outer groove the arm points up-left (+25.8 deg in Qt's clockwise
+  // rotation); at the label it lies almost flat (-2.3 deg).
+  readonly property real pivotX: platter.x + platter.width * 1.16
+  readonly property real pivotY: platter.y + platter.height * 0.30
+  readonly property real armLen: platter.width * 0.55       // pivot to stylus
+  readonly property real cwLen: platter.width * 0.12        // pivot to counterweight end
+  readonly property real angleOn: 25.8 - Math.max(0, Math.min(1, root.progress)) * 28.1
+  readonly property real angleRest: -80                     // parked on the rest, off the disc
+
+  readonly property color metal: Qt.rgba(
+    Color.foreground.r * 0.85 + 0.10, Color.foreground.g * 0.85 + 0.10,
+    Color.foreground.b * 0.85 + 0.10, 1)
+  readonly property color metalDark: Qt.darker(metal, 1.9)
+  readonly property color housing: Qt.rgba(metal.r * 0.55, metal.g * 0.55, metal.b * 0.58, 1)
+
+  // The arm rest: a small post with a clip, where the headshell parks.
+  Item {
+    x: root.pivotX - root.armLen * Math.cos(80 * Math.PI / 180) - width / 2
+    y: root.pivotY + root.armLen * Math.sin(80 * Math.PI / 180) - height * 0.55
+    width: root.size * 0.048
+    height: root.size * 0.05
+    z: 1
+    Rectangle {
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: parent.bottom
+      width: parent.width * 0.42
+      height: parent.height
+      radius: 2
+      color: root.housing
+      border.width: 1
+      border.color: Qt.rgba(0, 0, 0, 0.5)
+    }
+    Rectangle {
+      anchors.top: parent.top
+      width: parent.width
+      height: parent.height * 0.36
+      radius: 3
+      color: root.housing
+      border.width: 1
+      border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.25)
+    }
+  }
+
+  // The bearing housing does not turn; the arm turns inside it.
+  Rectangle {
+    id: bearing
+    x: root.pivotX - width / 2
+    y: root.pivotY - height / 2
+    width: platter.width * 0.12
+    height: width
+    radius: width / 2
+    z: 3
+    antialiasing: true
+    gradient: Gradient {
+      GradientStop { position: 0.0; color: Qt.lighter(root.housing, 1.25) }
+      GradientStop { position: 1.0; color: Qt.darker(root.housing, 1.5) }
+    }
+    border.width: 1
+    border.color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.3)
+
+    Rectangle {
+      anchors.centerIn: parent
+      width: parent.width * 0.42
+      height: width
+      radius: width / 2
+      color: Qt.darker(root.housing, 2.2)
+      border.width: 1
+      border.color: Qt.rgba(0, 0, 0, 0.6)
+      antialiasing: true
+    }
+  }
 
   Item {
     id: arm
-    readonly property real len: root.size * 0.52
-    width: len
-    height: root.size * 0.05
-    // The pivot is the arm's right end, sitting just outside the disc.
-    x: platter.x + platter.width * 1.02 - width
-    y: platter.y + platter.height * 0.02 - height / 2
-    transformOrigin: Item.Right
-    // Qt rotation is clockwise; the arm points left from its pivot, so a
-    // negative angle drops the headshell down onto the record. 12 degrees
-    // lands it on the outer groove, 30 puts it at the label.
-    rotation: root.engaged ? -(12 + root.progress * 18) : 4
-    opacity: 0.95
+    // Spans stylus (x = 0) to the back of the counterweight (x = width); the
+    // pivot is inside it, cwLen from the right end.
+    width: root.armLen + root.cwLen
+    height: root.size * 0.09
+    x: root.pivotX - root.armLen
+    y: root.pivotY - height / 2
+    z: 2
+    readonly property real pivotLocalX: root.armLen
+    readonly property real tubeH: Math.max(2.5, root.size * 0.026)
 
-    Behavior on rotation {
-      NumberAnimation { duration: 900; easing.type: Easing.InOutCubic }
+    transform: Rotation {
+      origin.x: arm.pivotLocalX
+      origin.y: arm.height / 2
+      angle: root.engaged ? root.angleOn : root.angleRest
+      Behavior on angle {
+        NumberAnimation { duration: 1100; easing.type: Easing.InOutCubic }
+      }
     }
 
-    // Counterweight end.
+    // Shadow under the tube, so the arm floats above the record.
     Rectangle {
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      width: parent.height * 1.7
-      height: parent.height * 1.7
-      radius: width / 2
-      color: Qt.lighter(Color.popups.background, 1.9)
-      border.width: 1
-      border.color: Qt.rgba(Color.foreground.r, Color.foreground.g,
-                            Color.foreground.b, 0.22)
-    }
-
-    // The arm tube.
-    Rectangle {
-      anchors.right: parent.right
-      anchors.rightMargin: parent.height * 0.8
-      anchors.verticalCenter: parent.verticalCenter
-      width: parent.width - parent.height
-      height: Math.max(2, parent.height * 0.30)
+      x: root.size * 0.09
+      y: arm.height / 2 - arm.tubeH / 2 + 3
+      width: arm.pivotLocalX - x
+      height: arm.tubeH
       radius: height / 2
-      color: Qt.rgba(Color.foreground.r, Color.foreground.g,
-                     Color.foreground.b, 0.55)
+      color: Qt.rgba(0, 0, 0, 0.35)
     }
 
-    // Headshell and needle.
+    // The tube: a cylinder, lit from above.
     Rectangle {
-      anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
-      width: parent.height * 1.25
-      height: parent.height * 0.85
-      radius: 2
-      color: Color.accent
-      opacity: 0.9
+      id: tube
+      x: root.size * 0.08
+      y: arm.height / 2 - arm.tubeH / 2
+      width: arm.pivotLocalX - x + root.size * 0.02
+      height: arm.tubeH
+      radius: height / 2
+      antialiasing: true
+      gradient: Gradient {
+        GradientStop { position: 0.0; color: Qt.lighter(root.metal, 1.25) }
+        GradientStop { position: 0.45; color: root.metal }
+        GradientStop { position: 1.0; color: root.metalDark }
+      }
+    }
+
+    // Counterweight: a fat knurled cylinder behind the pivot.
+    Rectangle {
+      x: arm.pivotLocalX + root.size * 0.035
+      y: arm.height / 2 - height / 2
+      width: root.cwLen - root.size * 0.035
+      height: arm.tubeH * 2.6
+      radius: 3
+      antialiasing: true
+      gradient: Gradient {
+        GradientStop { position: 0.0; color: Qt.lighter(root.housing, 1.4) }
+        GradientStop { position: 0.5; color: root.housing }
+        GradientStop { position: 1.0; color: Qt.darker(root.housing, 1.8) }
+      }
+      border.width: 1
+      border.color: Qt.rgba(0, 0, 0, 0.55)
+      // Knurling.
+      Row {
+        anchors.centerIn: parent
+        spacing: 2
+        Repeater {
+          model: 4
+          Rectangle { width: 1; height: parent.parent.height * 0.6; color: Qt.rgba(0, 0, 0, 0.35) }
+        }
+      }
+    }
+
+    // Headshell: angled in toward the record, as a real one is, so the
+    // stylus tracks the groove.
+    Item {
+      id: headshell
+      x: 0
+      y: arm.height / 2 - height / 2
+      width: root.size * 0.115
+      height: arm.tubeH * 2.4
+      transform: Rotation { origin.x: headshell.width; origin.y: headshell.height / 2; angle: -14 }
+
+      // Shell body, tapered toward the front.
+      Rectangle {
+        anchors.fill: parent
+        anchors.leftMargin: parent.width * 0.12
+        radius: 2
+        antialiasing: true
+        gradient: Gradient {
+          GradientStop { position: 0.0; color: Qt.lighter(root.metal, 1.15) }
+          GradientStop { position: 1.0; color: root.metalDark }
+        }
+        border.width: 1
+        border.color: Qt.rgba(0, 0, 0, 0.45)
+      }
+      // Finger lift.
+      Rectangle {
+        x: 0
+        y: -height * 0.35
+        width: parent.width * 0.34
+        height: Math.max(1.5, arm.tubeH * 0.55)
+        radius: height / 2
+        color: root.metal
+        antialiasing: true
+      }
+      // Cartridge, in the accent colour: the one bright thing on the arm.
+      Rectangle {
+        x: parent.width * 0.16
+        y: parent.height * 0.55
+        width: parent.width * 0.5
+        height: parent.height * 0.75
+        radius: 1.5
+        color: Color.accent
+        border.width: 1
+        border.color: Qt.darker(Color.accent, 1.6)
+        antialiasing: true
+      }
+      // Stylus.
+      Rectangle {
+        x: parent.width * 0.22
+        y: parent.height * 1.25
+        width: Math.max(1, root.size * 0.006)
+        height: Math.max(2, root.size * 0.02)
+        color: Color.foreground
+        antialiasing: true
+      }
     }
   }
 }

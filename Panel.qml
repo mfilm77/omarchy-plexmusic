@@ -105,7 +105,10 @@ PanelWindow {
     width: Math.min(1140, parent.width - 80)
     height: Math.min(740, parent.height - 80)
     radius: 16
-    color: Color.popups.background
+    // A touch of the desktop shows through the card — 5% — so it sits on the
+    // screen rather than covering it.
+    color: Qt.rgba(Color.popups.background.r, Color.popups.background.g,
+                   Color.popups.background.b, 0.95)
     border.width: 1
     border.color: Qt.rgba(Color.popups.border.r, Color.popups.border.g,
                           Color.popups.border.b, 0.6)
