@@ -42,14 +42,24 @@ Item {
       var c = width / 2, r = platter.width / 2
       var a = Color.accent, u = Color.urgent
       function rgba(col, al) { return "rgba(" + Math.round(col.r*255) + "," + Math.round(col.g*255) + "," + Math.round(col.b*255) + "," + al + ")" }
+      // Each pass is a ring of short overlapping arcs; the colour of every arc
+      // is a cosine blend between the two tones by angle, so the drift from
+      // pink to blue and back has no seams — a conical gradient banded here.
       var passes = [[1.010, 3, 0.55], [1.016, 8, 0.28], [1.028, 18, 0.14], [1.050, 34, 0.07], [1.085, 56, 0.035]]
+      var segs = 120, step = Math.PI * 2 / segs
+      ctx.lineCap = "butt"
       for (var i = 0; i < passes.length; i++) {
-        var g = ctx.createConicalGradient(c, c, 0.9)
-        g.addColorStop(0.00, rgba(u, passes[i][2])); g.addColorStop(0.25, rgba(a, passes[i][2]))
-        g.addColorStop(0.50, rgba(u, passes[i][2] * 0.8)); g.addColorStop(0.75, rgba(a, passes[i][2]))
-        g.addColorStop(1.00, rgba(u, passes[i][2]))
-        ctx.strokeStyle = g; ctx.lineWidth = passes[i][1]
-        ctx.beginPath(); ctx.arc(c, c, r * passes[i][0] + passes[i][1] / 2, 0, Math.PI * 2); ctx.stroke()
+        var rr = r * passes[i][0] + passes[i][1] / 2, al = passes[i][2]
+        ctx.lineWidth = passes[i][1]
+        for (var k = 0; k < segs; k++) {
+          var t0 = k * step, mid = t0 + step / 2
+          // two full pink/blue cycles around the ring, phase-shifted so pink
+          // sits top-right and bottom-left like the reference photo
+          var w = 0.5 + 0.5 * Math.cos(2 * mid - 0.9)
+          var cr = u.r * w + a.r * (1 - w), cg = u.g * w + a.g * (1 - w), cb = u.b * w + a.b * (1 - w)
+          ctx.strokeStyle = "rgba(" + Math.round(cr*255) + "," + Math.round(cg*255) + "," + Math.round(cb*255) + "," + al + ")"
+          ctx.beginPath(); ctx.arc(c, c, rr, t0 - step * 0.35, t0 + step * 1.35); ctx.stroke()
+        }
       }
     }
   }
