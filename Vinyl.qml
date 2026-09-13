@@ -197,12 +197,61 @@ Item {
       }
     }
 
-    // The sheen stays put while the record turns underneath it, which is what
-    // sells the rotation.
+    // The reflection vinyl shows under a light: cool, soft streaks radiating
+    // from the label, fixed in place while the grooves turn beneath them —
+    // which is what sells the rotation. Painted once, very low alpha.
+    Canvas {
+      id: gloss
+      anchors.fill: parent
+      antialiasing: true
+      renderStrategy: Canvas.Cooperative
+      onPaint: {
+        if (!(width > 0)) return
+        var c = width / 2
+        var outer = c * 0.985
+        var inner = Math.max(0, c * (root.labelRatio / 2) * 1.06)
+        if (!isFinite(outer) || !isFinite(inner) || inner >= outer) return
+        var ctx = getContext("2d")
+        ctx.reset()
+        // Clip to the grooved ring.
+        ctx.beginPath()
+        ctx.arc(c, c, outer, 0, Math.PI * 2)
+        ctx.arc(c, c, inner, 0, Math.PI * 2, true)
+        ctx.clip()
+        // Uneven light wedges around the disc, brighter on the lit side.
+        var cg = ctx.createConicalGradient(c, c, -0.6)
+        var stops = [
+          [0.00, 0.00], [0.06, 0.30], [0.10, 0.04], [0.17, 0.17], [0.24, 0.00],
+          [0.31, 0.10], [0.36, 0.00], [0.47, 0.20], [0.53, 0.04], [0.58, 0.26],
+          [0.64, 0.00], [0.74, 0.12], [0.80, 0.00], [0.88, 0.19], [0.94, 0.02],
+          [1.00, 0.00]
+        ]
+        for (var i = 0; i < stops.length; i++)
+          cg.addColorStop(stops[i][0], "rgba(150,200,255," + stops[i][1] + ")")
+        ctx.fillStyle = cg
+        ctx.fillRect(0, 0, width, height)
+        // Radial fade: strongest a third of the way out, gone at the rim.
+        var rg = ctx.createRadialGradient(c, c, inner, c, c, outer)
+        rg.addColorStop(0.0, "rgba(5,8,14,0.10)")
+        rg.addColorStop(0.35, "rgba(5,8,14,0.0)")
+        rg.addColorStop(0.75, "rgba(5,8,14,0.25)")
+        rg.addColorStop(1.0, "rgba(5,8,14,0.55)")
+        ctx.fillStyle = rg
+        ctx.fillRect(0, 0, width, height)
+        // A faint bright ring at the run-out, as the photo has.
+        ctx.beginPath()
+        ctx.arc(c, c, inner * 1.05, 0, Math.PI * 2)
+        ctx.lineWidth = Math.max(1, c * 0.02)
+        ctx.strokeStyle = "rgba(150,200,255,0.12)"
+        ctx.stroke()
+      }
+    }
+
+    // The linear sheen, kept but quieter now the streaks carry the light.
     Rectangle {
       anchors.fill: parent
       radius: width / 2
-      opacity: 0.5
+      opacity: 0.3
       gradient: Gradient {
         orientation: Gradient.Horizontal
         GradientStop { position: 0.0; color: "transparent" }
