@@ -100,6 +100,7 @@ Item {
   property int queueCount: 0
   property bool queueShuffled: false     // whether what is playing was started shuffled
   property bool shuffle: true
+  property bool loop: false               // repeat the queue when it ends
   property real volume: 100
 
   // ---- spectrum -----------------------------------------------------------
@@ -287,6 +288,7 @@ Item {
         root.queuePos = (d.playlistPos || 0) + 1
         root.queueCount = d.playlistCount || 0
         root.queueShuffled = !!d.shuffle
+        if (typeof d.loop === "boolean") root.loop = d.loop
         // Only trust mpv's volume once nothing of ours is still in flight.
         if (typeof d.volume === "number" && !root.volumeDragging
             && root.pendingVolume < 0 && !volProc.running) root.volume = d.volume
@@ -384,6 +386,7 @@ Item {
     if (!key) return
     var args = [root.helper, "play", "--key", String(key)]
     if (root.shuffle) args.push("--shuffle")
+    if (root.loop) args.push("--loop")
     playProc.command = args
     playProc.running = true
   }
@@ -599,6 +602,7 @@ Item {
     var args = [root.helper, "play", "--album", String(key)]
     if (startAt) args.push("--start-at", String(startAt))
     else if (root.shuffle) args.push("--shuffle")
+    if (root.loop) args.push("--loop")
     playProc.command = args
     playProc.running = true
   }
@@ -608,14 +612,24 @@ Item {
     var args = [root.helper, "play", "--playlist", String(key)]
     if (startAt) args.push("--start-at", String(startAt))
     else if (root.shuffle) args.push("--shuffle")
+    if (root.loop) args.push("--loop")
     playProc.command = args
     playProc.running = true
   }
 
   function playTracks(keys) {
     if (!keys || keys.length === 0) return
-    playProc.command = [root.helper, "play", "--tracks", keys.join(",")]
+    var args = [root.helper, "play", "--tracks", keys.join(",")]
+    if (root.loop) args.push("--loop")
+    playProc.command = args
     playProc.running = true
+  }
+
+  function setLoop(on) {
+    root.loop = !!on
+    // Applies to the queue that is playing now as well as the next one.
+    cmdProc.command = [root.helper, "cmd", "loop", "--value", root.loop ? "1" : "0"]
+    cmdProc.running = true
   }
 
   function requestAdd(keys) {

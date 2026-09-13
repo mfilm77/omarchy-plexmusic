@@ -164,6 +164,13 @@ PanelWindow {
         }
 
         IconToggle {
+          glyph: "󰑖"
+          tip: "Repeat — start again from the beginning when the album, playlist or queue ends"
+          on: root.service ? root.service.loop : false
+          onTapped: if (root.service) root.service.setLoop(!root.service.loop)
+        }
+
+        IconToggle {
           glyph: "󰒓"
           tip: "Settings — account, server address, library"
           on: root.service ? root.service.view === "settings" : false
@@ -474,6 +481,7 @@ PanelWindow {
             text: root.service
               ? root.service.queuePos + " of " + root.service.queueCount
                 + (root.service.queueShuffled ? "  ·  shuffled" : "")
+                + (root.service.loop ? "  ·  repeat" : "")
               : ""
             font.pixelSize: 10
             color: root.dim(0.35)
@@ -564,6 +572,9 @@ PanelWindow {
                 break
               case Qt.Key_Escape:
                 root.closeStep(); event.accepted = true; break
+              case Qt.Key_L:
+                if (event.modifiers & Qt.ControlModifier) { root.service.setLoop(!root.service.loop); event.accepted = true }
+                break
               case Qt.Key_Comma:
                 if (event.modifiers & Qt.ControlModifier) {
                   root.service.openSettings(); addressField.forceActiveFocus(); event.accepted = true

@@ -575,7 +575,8 @@ def mpv_stop() -> None:
         pass
 
 
-def mpv_launch(playlist_path: str, shuffle: bool, start_index: int = 0) -> None:
+def mpv_launch(playlist_path: str, shuffle: bool, start_index: int = 0,
+               loop: bool = False) -> None:
     mpv_stop()
     args = [
         "mpv",
@@ -600,6 +601,8 @@ def mpv_launch(playlist_path: str, shuffle: bool, start_index: int = 0) -> None:
         # Start partway through the queue while keeping the whole of it, so
         # position N of M is really N of M and "previous" can go back.
         args.append(f"--playlist-start={start_index}")
+    if loop:
+        args.append("--loop-playlist=inf")
     # Escape hatch for output device, replaygain mode, filters, etc.
     extra = os.environ.get("PLEXMUSIC_MPV_ARGS", "").strip()
     if extra:
@@ -1003,7 +1006,8 @@ def cmd_play(args) -> None:
         "tracks": tracks,
     })
 
-    mpv_launch(PLAYLIST_FILE, shuffle=args.shuffle, start_index=start_index)
+    mpv_launch(PLAYLIST_FILE, shuffle=args.shuffle, start_index=start_index,
+               loop=bool(args.loop))
     # Warm the cover of the track that will sound first.
     first_art = None
     if tracks:
@@ -1042,6 +1046,10 @@ def cmd_cmd(args) -> None:
         if args.value is None:
             die("seek needs --value SECONDS (absolute)")
         mpv_request(["seek", float(args.value), "absolute"])
+    elif action == "loop":
+        # Repeat the whole queue when it ends. Takes effect on the running
+        # player immediately.
+        mpv_request(["set_property", "loop-playlist", "inf" if (args.value or 0) > 0 else "no"])
     else:
         die(f"unknown command: {action}")
     emit({"action": action})
@@ -1102,6 +1110,7 @@ def cmd_now(args) -> None:
         "playlistPos": pos,
         "playlistCount": mpv_get("playlist-count") or 0,
         "shuffle": bool(queue.get("shuffle")),
+        "loop": mpv_get("loop-playlist") in ("inf", "force", True),
         "key": entry.get("key") or "",
         "albumKey": entry.get("albumKey") or "",
     })
@@ -1178,11 +1187,12 @@ def main() -> None:
     p.add_argument("--tracks", help="comma-separated track ratingKeys")
     p.add_argument("--start-at", help="track ratingKey to begin from")
     p.add_argument("--shuffle", action="store_true")
+    p.add_argument("--loop", action="store_true", help="repeat the queue when it ends")
     p.set_defaults(func=cmd_play)
 
     p = sub.add_parser("cmd")
     p.add_argument("action", choices=["play-pause", "play", "pause", "next",
-                                      "prev", "stop", "volume", "seek"])
+                                      "prev", "stop", "volume", "seek", "loop"])
     p.add_argument("--value", type=float)
     p.set_defaults(func=cmd_cmd)
 

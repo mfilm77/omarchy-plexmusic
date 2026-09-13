@@ -33,6 +33,7 @@ Keyboard, with the cursor in the search box the whole time:
 | Ctrl+Enter | play the highlighted row |
 | ← / Backspace (empty box) | back |
 | Ctrl+P | add the highlighted track or album to a playlist |
+| Ctrl+L | repeat on/off — start again when the album, playlist or queue ends |
 | Esc | close the popup, clear the search, go back, then close the panel |
 
 ## Why this rather than the other Plex plugins
@@ -187,6 +188,8 @@ changing the replaygain mode.
   label for the last, creeping inward per song; its rest sits just off the edge
   by the lead-in, so cueing is a lift and a few degrees, never a sweep across
   the record.
+- **Shuffle** and **Repeat** are the two toggles in the header. Repeat applies to
+  the queue that is playing and to the next one you start.
 - **Timeline** — click or drag to seek. **Volume** is a small console fader at
   the deck's right edge (drag, or scroll over it).
 - **The meters** are `cava` in raw mode, read a frame at a time. cava taps the
