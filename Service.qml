@@ -218,7 +218,9 @@ Item {
         root.duration = d.duration || 0
         root.queuePos = (d.playlistPos || 0) + 1
         root.queueCount = d.playlistCount || 0
-        if (typeof d.volume === "number" && !root.volumeDragging) root.volume = d.volume
+        // Only trust mpv's volume once nothing of ours is still in flight.
+        if (typeof d.volume === "number" && !root.volumeDragging
+            && root.pendingVolume < 0 && !volProc.running) root.volume = d.volume
       }
     }
   }
@@ -324,10 +326,21 @@ Item {
 
   // While the fader is being dragged the poll must not fight the hand.
   property bool volumeDragging: false
+  // Last value wins: a drag fires far faster than a helper process runs, so
+  // moves are queued one deep and the newest is sent when the previous lands.
+  property real pendingVolume: -1
 
   function setVolume(value) {
     var v = Math.max(0, Math.min(100, Math.round(value)))
     root.volume = v
+    root.pendingVolume = v
+    root.flushVolume()
+  }
+
+  function flushVolume() {
+    if (volProc.running || root.pendingVolume < 0) return
+    var v = root.pendingVolume
+    root.pendingVolume = -1
     volProc.command = [root.helper, "cmd", "volume", "--value", String(v)]
     volProc.running = true
   }
@@ -340,7 +353,10 @@ Item {
   }
 
   // Its own process so a run of fader moves never cancels a transport command.
-  Process { id: volProc }
+  Process {
+    id: volProc
+    onExited: root.flushVolume()
+  }
 
   function isFavourite(key) {
     var k = String(key)

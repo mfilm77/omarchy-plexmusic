@@ -26,10 +26,10 @@ Item {
     // The platter takes the lower-left 78% of the item. The strip above and
     // to the right is where the arm's bearing sits — back-right of the
     // platter, as on a deck seen from above.
-    width: root.size * 0.76
+    width: root.size * 0.80
     height: width
     x: 0
-    y: root.size * 0.21
+    y: root.size * 0.10
 
     // Everything that must turn with the record lives in here.
     Item {
@@ -243,13 +243,18 @@ Item {
   // is -96.3 degrees at the outer groove and -68.9 at the label. The rest is
   // four degrees further out, just off the edge, so cueing is a lift and a
   // short move inward — never a sweep across the label.
-  readonly property real pivotX: platter.x + platter.width * 0.895
-  readonly property real pivotY: platter.y - platter.height * 0.198
-  readonly property real armLen: platter.width * 0.62       // pivot to stylus
-  readonly property real cwLen: platter.width * 0.09        // pivot to counterweight end
-  readonly property real angleOn: -(96.3 - Math.max(0, Math.min(1, root.progress)) * 27.4)
-  // Parked clearly off the record — 12 degrees out from the lead-in, r = 0.60.
-  readonly property real angleRest: -108
+  // From the reference photos: a long arm from a bearing at the back-right,
+  // reaching almost straight forward; the needle drops at the record's
+  // lower-right (r = 0.47 at t = 70.6 deg) and arcs in to the label (r = 0.21
+  // at 52 deg); the rest is just off the lower-right edge at 80 deg, the arm
+  // parked nearly vertical along the platter's right side.
+  readonly property real pivotX: platter.x + platter.width * 1.12
+  readonly property real pivotY: platter.y - platter.height * 0.05
+  readonly property real armLen: platter.width * 0.965      // pivot to stylus
+  readonly property real cwLen: platter.width * 0.07        // pivot to counterweight end
+  readonly property real angleOn: -(70.6 - Math.max(0, Math.min(1, root.progress)) * 18.6)
+  // Parked off the record's lower-right edge, r = 0.60.
+  readonly property real angleRest: -80
 
   readonly property color metal: Qt.rgba(
     Color.foreground.r * 0.85 + 0.10, Color.foreground.g * 0.85 + 0.10,
@@ -261,8 +266,8 @@ Item {
   Item {
     // Where the stylus is at angleRest (t = 100 degrees from the arm's
     // leftward axis): just off the record's right edge.
-    x: root.pivotX - root.armLen * Math.cos(108 * Math.PI / 180) - width / 2
-    y: root.pivotY + root.armLen * Math.sin(108 * Math.PI / 180) - height * 0.5
+    x: root.pivotX - root.armLen * Math.cos(80 * Math.PI / 180) - width / 2
+    y: root.pivotY + root.armLen * Math.sin(80 * Math.PI / 180) - height * 0.5
     width: root.size * 0.048
     height: root.size * 0.05
     z: 1
@@ -389,57 +394,64 @@ Item {
       }
     }
 
-    // Headshell: angled in toward the record, as a real one is, so the
-    // stylus tracks the groove.
+    // Headshell: a slim shell continuing the tube, offset toward the spindle
+    // by about 20 degrees as a real one is, with the cartridge at its nose.
+    // Everything is symmetric about the arm's centre line so it reads as an
+    // angled headshell and not a twisted one.
     Item {
       id: headshell
       x: 0
       y: arm.height / 2 - height / 2
-      width: root.size * 0.115
-      height: arm.tubeH * 2.4
-      transform: Rotation { origin.x: headshell.width; origin.y: headshell.height / 2; angle: -14 }
+      width: root.size * 0.11
+      height: arm.tubeH * 2.0
+      transform: Rotation { origin.x: headshell.width; origin.y: headshell.height / 2; angle: -20 }
 
-      // Shell body, tapered toward the front.
+      // Collar where the shell meets the tube.
       Rectangle {
-        anchors.fill: parent
-        anchors.leftMargin: parent.width * 0.12
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        width: parent.width * 0.16
+        height: arm.tubeH * 1.5
+        radius: 1.5
+        color: root.metalDark
+        antialiasing: true
+      }
+      // The shell, tapering slightly toward the nose.
+      Rectangle {
+        anchors.left: parent.left
+        anchors.leftMargin: parent.width * 0.06
+        anchors.right: parent.right
+        anchors.rightMargin: parent.width * 0.14
+        anchors.verticalCenter: parent.verticalCenter
+        height: parent.height
         radius: 2
         antialiasing: true
         gradient: Gradient {
           GradientStop { position: 0.0; color: Qt.lighter(root.metal, 1.15) }
+          GradientStop { position: 0.5; color: root.metal }
           GradientStop { position: 1.0; color: root.metalDark }
         }
         border.width: 1
         border.color: Qt.rgba(0, 0, 0, 0.45)
       }
-      // Finger lift.
+      // Cartridge at the nose, in the accent colour, centred on the line.
       Rectangle {
-        x: 0
-        y: -height * 0.35
-        width: parent.width * 0.34
-        height: Math.max(1.5, arm.tubeH * 0.55)
-        radius: height / 2
-        color: root.metal
-        antialiasing: true
-      }
-      // Cartridge, in the accent colour: the one bright thing on the arm.
-      Rectangle {
-        x: parent.width * 0.16
-        y: parent.height * 0.55
-        width: parent.width * 0.5
-        height: parent.height * 0.75
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        width: parent.width * 0.32
+        height: parent.height * 0.78
         radius: 1.5
         color: Color.accent
         border.width: 1
         border.color: Qt.darker(Color.accent, 1.6)
         antialiasing: true
       }
-      // Stylus.
+      // Stylus tip.
       Rectangle {
-        x: parent.width * 0.22
-        y: parent.height * 1.25
-        width: Math.max(1, root.size * 0.006)
-        height: Math.max(2, root.size * 0.02)
+        anchors.left: parent.left
+        anchors.leftMargin: -1.5
+        anchors.verticalCenter: parent.verticalCenter
+        width: 3; height: 3; radius: 1.5
         color: Color.foreground
         antialiasing: true
       }
