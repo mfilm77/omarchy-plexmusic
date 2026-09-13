@@ -83,14 +83,6 @@ PanelWindow {
     onClicked: root.dismiss()
   }
 
-  // When the add-to-playlist popup closes, the keyboard must come back to the
-  // search field, or the arrows keep going to a name field nobody can see.
-  Connections {
-    target: root.service
-    function onAddOpenChanged() {
-      if (root.service && !root.service.addOpen && root.visible) searchField.forceActiveFocus()
-    }
-  }
 
   Rectangle {
     anchors.fill: parent
@@ -1306,6 +1298,9 @@ PanelWindow {
       id: addLayer
       anchors.fill: parent
       visible: root.service ? root.service.addOpen : false
+      // When the popup closes, the keyboard must come back to the search
+      // field, or the arrows keep going to a name field nobody can see.
+      onVisibleChanged: if (!visible && root.visible) searchField.forceActiveFocus()
 
       MouseArea {
         anchors.fill: parent
