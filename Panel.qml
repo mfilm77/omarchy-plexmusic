@@ -288,10 +288,12 @@ PanelWindow {
           id: vinyl
           anchors.horizontalCenter: parent.horizontalCenter
           anchors.top: parent.top
-          width: Math.max(0, Math.min(parent.width, parent.height - 130))
+          // Leave the title block real room under the record.
+          width: Math.max(0, Math.min(parent.width, parent.height - 165))
           height: width
           spinning: root.service ? (root.service.playing && !root.service.paused) : false
-          engaged: root.service ? root.service.playing : false
+          // Paused or stopped, the arm goes back to its rest, off the record.
+          engaged: root.service ? (root.service.playing && !root.service.paused) : false
           art: root.service ? root.service.artPath : ""
           // The arm reads the whole side, not the track: first song at the outer
           // groove, last song by the label, creeping inward as each one plays.

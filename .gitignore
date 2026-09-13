@@ -12,3 +12,11 @@ queue.m3u
 
 __pycache__/
 *.pyc
+
+# The tag-fix report tooling is estate-specific (it names machines); it is not
+# part of the published plugin.
+tools/tagfix_match.py
+tools/report/
+tools/*.csv
+tools/*.json
+tools/mb_cache/

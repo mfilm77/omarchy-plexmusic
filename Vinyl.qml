@@ -26,10 +26,10 @@ Item {
     // The platter takes the lower-left 78% of the item. The strip above and
     // to the right is where the arm's bearing sits — back-right of the
     // platter, as on a deck seen from above.
-    width: root.size * 0.78
+    width: root.size * 0.76
     height: width
     x: 0
-    y: root.size * 0.22
+    y: root.size * 0.21
 
     // Everything that must turn with the record lives in here.
     Item {
@@ -248,7 +248,8 @@ Item {
   readonly property real armLen: platter.width * 0.62       // pivot to stylus
   readonly property real cwLen: platter.width * 0.09        // pivot to counterweight end
   readonly property real angleOn: -(96.3 - Math.max(0, Math.min(1, root.progress)) * 27.4)
-  readonly property real angleRest: -100
+  // Parked clearly off the record — 12 degrees out from the lead-in, r = 0.60.
+  readonly property real angleRest: -108
 
   readonly property color metal: Qt.rgba(
     Color.foreground.r * 0.85 + 0.10, Color.foreground.g * 0.85 + 0.10,
@@ -260,8 +261,8 @@ Item {
   Item {
     // Where the stylus is at angleRest (t = 100 degrees from the arm's
     // leftward axis): just off the record's right edge.
-    x: root.pivotX - root.armLen * Math.cos(100 * Math.PI / 180) - width / 2
-    y: root.pivotY + root.armLen * Math.sin(100 * Math.PI / 180) - height * 0.5
+    x: root.pivotX - root.armLen * Math.cos(108 * Math.PI / 180) - width / 2
+    y: root.pivotY + root.armLen * Math.sin(108 * Math.PI / 180) - height * 0.5
     width: root.size * 0.048
     height: root.size * 0.05
     z: 1
