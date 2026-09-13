@@ -292,10 +292,107 @@ class Plex:
                 break
         return artists
 
-    def artist_tracks(self, rating_key: str) -> list[dict]:
-        data = self.get(f"/library/metadata/{rating_key}/allLeaves")
+    def machine_id(self) -> str:
+        cached = self.settings.get("machineIdentifier")
+        if cached:
+            return cached
+        ident = self.get("/identity")
+        mid = ident.get("MediaContainer", {}).get("machineIdentifier", "")
+        if mid:
+            self.settings["machineIdentifier"] = mid
+            write_json(SETTINGS_FILE, self.settings)
+        return mid
+
+    def art_url(self, thumb: str, size: int = 160) -> str:
+        """A direct, resized artwork URL for the panel's Image items.
+
+        Stays on this machine: the token is in the URL, and the URL only ever
+        goes from the helper's stdout into the shell's own image loader.
+        """
+        if not thumb:
+            return ""
+        base = self.base or self.resolve_base()
+        query = urllib.parse.urlencode({
+            "width": size, "height": size, "minSize": 1, "upscale": 1,
+            "url": thumb, "X-Plex-Token": self.token,
+        })
+        return f"{base}/photo/:/transcode?{query}"
+
+    def artist_albums(self, rating_key: str) -> list[dict]:
+        data = self.get(f"/library/metadata/{rating_key}/children")
+        albums: list[dict] = []
+        for m in data.get("MediaContainer", {}).get("Metadata", []) or []:
+            if m.get("type") != "album":
+                continue
+            thumb = m.get("thumb") or m.get("parentThumb") or ""
+            albums.append({
+                "key": str(m.get("ratingKey")),
+                "title": m.get("title") or "",
+                "year": m.get("year") or 0,
+                "tracks": m.get("leafCount") or m.get("childCount") or 0,
+                "thumb": thumb,
+                "artUrl": self.art_url(thumb),
+            })
+        # Newest first, as a discography is usually read.
+        albums.sort(key=lambda a: (-(a["year"] or 0), a["title"].lower()))
+        return albums
+
+    def playlists(self) -> list[dict]:
+        data = self.get("/playlists", {"playlistType": "audio"})
+        out: list[dict] = []
+        for m in data.get("MediaContainer", {}).get("Metadata", []) or []:
+            if m.get("smart"):
+                # Smart playlists are rules, not lists; nothing can be added.
+                continue
+            out.append({
+                "key": str(m.get("ratingKey")),
+                "title": m.get("title") or "",
+                "tracks": m.get("leafCount") or 0,
+                "duration": int(m.get("duration") or 0),
+                "thumb": m.get("composite") or "",
+                "artUrl": self.art_url(m.get("composite") or ""),
+            })
+        out.sort(key=lambda p: p["title"].lower())
+        return out
+
+    def playlist_create(self, title: str, track_keys: list[str]) -> dict:
+        uri = self.library_uri(track_keys)
+        query = urllib.parse.urlencode(
+            {"type": "audio", "title": title, "smart": 0, "uri": uri})
+        req = urllib.request.Request(
+            (self.base or self.resolve_base()) + "/playlists?" + query,
+            headers=self.headers(), method="POST")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+        data = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
+        items = data.get("MediaContainer", {}).get("Metadata", []) or []
+        return {"key": str(items[0].get("ratingKey")) if items else "",
+                "title": title}
+
+    def playlist_add(self, playlist_key: str, track_keys: list[str]) -> int:
+        uri = self.library_uri(track_keys)
+        query = urllib.parse.urlencode({"uri": uri})
+        req = urllib.request.Request(
+            (self.base or self.resolve_base())
+            + f"/playlists/{playlist_key}/items?" + query,
+            headers=self.headers(), method="PUT")
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+        data = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
+        return int(data.get("MediaContainer", {}).get("leafCountAdded") or 0)
+
+    def library_uri(self, track_keys: list[str]) -> str:
+        keys = ",".join(str(k) for k in track_keys if k)
+        return (f"server://{self.machine_id()}/com.plexapp.plugins.library"
+                f"/library/metadata/{keys}")
+
+    def tracks_at(self, path: str) -> list[dict]:
+        """Playable tracks under any Plex path that lists track metadata."""
+        data = self.get(path)
         tracks: list[dict] = []
         for m in data.get("MediaContainer", {}).get("Metadata", []) or []:
+            if m.get("type") not in (None, "track"):
+                continue
             part = None
             for media in m.get("Media", []) or []:
                 for p in media.get("Part", []) or []:
@@ -311,6 +408,8 @@ class Plex:
                 "title": m.get("title") or "",
                 "album": m.get("parentTitle") or "",
                 "artist": m.get("grandparentTitle") or m.get("originalTitle") or "",
+                "index": int(m.get("index") or 0),
+                "disc": int(m.get("parentIndex") or 1),
                 "duration": int(m.get("duration") or 0),
                 "part": part["key"],
                 # The vinyl label art. Album cover first, artist shot as the
@@ -319,6 +418,18 @@ class Plex:
                 "albumThumb": m.get("parentThumb") or m.get("grandparentThumb") or "",
             })
         return tracks
+
+    def artist_tracks(self, rating_key: str) -> list[dict]:
+        return self.tracks_at(f"/library/metadata/{rating_key}/allLeaves")
+
+    def album_tracks(self, rating_key: str) -> list[dict]:
+        return self.tracks_at(f"/library/metadata/{rating_key}/children")
+
+    def playlist_tracks(self, rating_key: str) -> list[dict]:
+        return self.tracks_at(f"/playlists/{rating_key}/items")
+
+    def tracks_by_keys(self, keys: list[str]) -> list[dict]:
+        return self.tracks_at("/library/metadata/" + ",".join(keys))
 
     def stream_url(self, part_key: str) -> str:
         base = self.base or self.resolve_base()
@@ -669,12 +780,75 @@ def cmd_favourites(args) -> None:
     die(f"unknown favourites action: {args.action}")
 
 
+def cmd_albums(args) -> None:
+    plex = Plex()
+    plex.resolve_base()
+    emit({"albums": plex.artist_albums(args.artist), "artistKey": args.artist})
+
+
+def cmd_tracks(args) -> None:
+    plex = Plex()
+    plex.resolve_base()
+    if args.album:
+        tracks, source = plex.album_tracks(args.album), {"album": args.album}
+    elif args.playlist:
+        tracks, source = plex.playlist_tracks(args.playlist), {"playlist": args.playlist}
+    elif args.artist:
+        tracks, source = plex.artist_tracks(args.artist), {"artist": args.artist}
+    else:
+        die("tracks needs --album, --playlist or --artist")
+    for t in tracks:
+        t.pop("part", None)          # the token-bearing bit stays out of the UI
+        t["artUrl"] = plex.art_url(t.get("albumThumb", ""), 96)
+    emit({"tracks": tracks, "source": source})
+
+
+def cmd_playlists(args) -> None:
+    plex = Plex()
+    plex.resolve_base()
+    if args.action == "list":
+        emit({"playlists": plex.playlists()})
+        return
+    keys = [k for k in (args.tracks or "").split(",") if k.strip()]
+    if args.action == "create":
+        if not args.title:
+            die("playlists create needs --title")
+        created = plex.playlist_create(args.title.strip(), keys)
+        emit({"created": created, "added": len(keys), "playlists": plex.playlists()})
+        return
+    if args.action == "add":
+        if not args.key or not keys:
+            die("playlists add needs --key and --tracks k1,k2")
+        added = plex.playlist_add(args.key, keys)
+        emit({"key": args.key, "added": added, "playlists": plex.playlists()})
+        return
+    die(f"unknown playlists action: {args.action}")
+
+
 def cmd_play(args) -> None:
     plex = Plex()
     plex.resolve_base()
-    tracks = plex.artist_tracks(args.key)
+    if args.album:
+        tracks, source = plex.album_tracks(args.album), {"album": args.album}
+    elif args.playlist:
+        tracks, source = plex.playlist_tracks(args.playlist), {"playlist": args.playlist}
+    elif args.tracks:
+        keys = [k for k in args.tracks.split(",") if k.strip()]
+        tracks, source = plex.tracks_by_keys(keys), {"tracks": keys}
+    elif args.key:
+        tracks, source = plex.artist_tracks(args.key), {"artist": args.key}
+    else:
+        die("play needs --key (artist), --album, --playlist or --tracks")
     if not tracks:
-        die("that artist has no playable tracks")
+        die("nothing playable there")
+
+    # Start partway through an album or playlist: everything before the chosen
+    # track is dropped rather than reordered, so "next" still means next.
+    if args.start_at:
+        for i, t in enumerate(tracks):
+            if t["key"] == str(args.start_at):
+                tracks = tracks[i:]
+                break
 
     lines = ["#EXTM3U"]
     for t in tracks:
@@ -697,7 +871,7 @@ def cmd_play(args) -> None:
     # playlist is — these URLs carry the token.
     write_json(QUEUE_FILE, {
         "startedAt": int(time.time()),
-        "artistKey": args.key,
+        "source": source,
         "shuffle": bool(args.shuffle),
         "tracks": tracks,
     })
@@ -707,7 +881,7 @@ def cmd_play(args) -> None:
     first_art = None
     if tracks:
         first_art = plex.art_path(tracks[0].get("albumThumb", ""))
-    emit({"trackCount": len(tracks), "artistKey": args.key,
+    emit({"trackCount": len(tracks), "source": source,
           "shuffle": bool(args.shuffle), "art": first_art})
 
 
@@ -831,8 +1005,29 @@ def main() -> None:
     p.add_argument("--position", type=int, default=0)
     p.set_defaults(func=cmd_favourites)
 
+    p = sub.add_parser("albums")
+    p.add_argument("--artist", required=True)
+    p.set_defaults(func=cmd_albums)
+
+    p = sub.add_parser("tracks")
+    p.add_argument("--album")
+    p.add_argument("--playlist")
+    p.add_argument("--artist")
+    p.set_defaults(func=cmd_tracks)
+
+    p = sub.add_parser("playlists", help="Plex playlists: list, create, add")
+    p.add_argument("action", choices=["list", "create", "add"])
+    p.add_argument("--key", help="playlist ratingKey (add)")
+    p.add_argument("--title", help="new playlist title (create)")
+    p.add_argument("--tracks", help="comma-separated track ratingKeys")
+    p.set_defaults(func=cmd_playlists)
+
     p = sub.add_parser("play")
-    p.add_argument("--key", required=True, help="artist ratingKey")
+    p.add_argument("--key", help="artist ratingKey")
+    p.add_argument("--album", help="album ratingKey")
+    p.add_argument("--playlist", help="playlist ratingKey")
+    p.add_argument("--tracks", help="comma-separated track ratingKeys")
+    p.add_argument("--start-at", help="track ratingKey to begin from")
     p.add_argument("--shuffle", action="store_true")
     p.set_defaults(func=cmd_play)
 

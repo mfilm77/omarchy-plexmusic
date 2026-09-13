@@ -105,6 +105,8 @@ Item {
           fillMode: Image.PreserveAspectCrop
           cache: true
           asynchronous: true
+          smooth: true
+          mipmap: true
           visible: false
           sourceSize.width: 500
           sourceSize.height: 500
@@ -115,19 +117,29 @@ Item {
           source: cover
           maskEnabled: true
           maskSource: labelMask
+          // Soften the mask edge a touch either side of the threshold; with a
+          // hard threshold the circle is cut on whole pixels and looks jagged.
+          maskThresholdMin: 0.4
+          maskSpreadAtMin: 0.6
           visible: cover.status === Image.Ready
         }
 
+        // The circular mask, rendered at twice the label's size with
+        // antialiasing so its edge is smooth once scaled onto the cover.
         Item {
           id: labelMask
           width: root.labelSize
           height: root.labelSize
           layer.enabled: true
+          layer.smooth: true
+          layer.textureSize: Qt.size(Math.max(2, Math.round(width * 2)),
+                                     Math.max(2, Math.round(height * 2)))
           visible: false
           Rectangle {
             anchors.fill: parent
             radius: width / 2
             color: "black"
+            antialiasing: true
           }
         }
 
@@ -145,8 +157,9 @@ Item {
           anchors.fill: parent
           radius: width / 2
           color: "transparent"
-          border.width: 1
-          border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.5)
+          border.width: 1.5
+          border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.55)
+          antialiasing: true
         }
       }
 

@@ -11,6 +11,30 @@ nothing via the cloud.
 
 ![Plex Music](preview.png)
 
+## What is in the panel
+
+- **Starred** — the artists you keep. Star any artist to add them.
+- **All artists** — the whole library A–Z with a jump strip.
+- **Playlists** — your Plex playlists (the real ones; they show up in every
+  other Plex app).
+- Open an artist for their **albums** (covers, years), an album for its
+  **tracks**. Every row has play; clicking a track plays the album from there.
+- The **+** on a track, an album, or "Add all" opens *Add to playlist*: pick an
+  existing playlist or type a name to start a new one. The plugin only ever
+  adds — it never removes tracks or deletes playlists.
+
+Keyboard, with the cursor in the search box the whole time:
+
+| Key | Does |
+| --- | --- |
+| type | search artists |
+| ↑ ↓ / PgUp PgDn | move the highlight |
+| Enter | open the highlighted row (artist → albums → tracks); on a track, play from it |
+| Ctrl+Enter | play the highlighted row |
+| ← / Backspace (empty box) | back |
+| Ctrl+P | add the highlighted track or album to a playlist |
+| Esc | close the popup, clear the search, go back, then close the panel |
+
 ## Why this rather than the other Plex plugins
 
 The Plex plugins on the marketplace either monitor the server or play video.
@@ -108,7 +132,10 @@ testable without the shell:
 | `index` | build the artist index (a few seconds for thousands of artists) |
 | `search QUERY` | match artists, accent- and case-insensitively |
 | `favourites list\|add\|remove\|move` | the starred list |
-| `play --key KEY [--shuffle]` | play an artist |
+| `albums --artist KEY` | an artist's albums, newest first |
+| `tracks --album KEY` / `--playlist KEY` / `--artist KEY` | track listings |
+| `playlists list` / `create --title T --tracks k1,k2` / `add --key P --tracks k1,k2` | Plex playlists (add-only, never delete) |
+| `play --key ARTIST` / `--album KEY` / `--playlist KEY` / `--tracks k1,k2` `[--start-at K] [--shuffle]` | play |
 | `cmd play-pause\|next\|prev\|stop\|volume` | transport |
 | `now` | what is playing, with the cached cover's path |
 | `art THUMB` | cache a cover and print its local path |

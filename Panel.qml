@@ -6,12 +6,14 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
-// The turntable. A record with the real cover on the label, your starred
-// artists down the side, a search box over the whole library, and the meter
-// band along the bottom.
+// The turntable. A record with the real cover on the label on the left; on the
+// right a browser over the library — starred artists, everything A-Z, an
+// artist's albums, an album's tracks, and your Plex playlists — with a search
+// box over all of it; and the meter band along the bottom.
 //
-// Clicking an artist plays them — that is the entire interaction. Everything
-// else on this panel is there to tell you what is happening.
+// Clicking a row opens it; the play button on the row plays it; the plus adds
+// it to a Plex playlist. Playlists are the real ones on the server, so what is
+// built here shows up in every other Plex app.
 PanelWindow {
   id: root
 
@@ -29,19 +31,30 @@ PanelWindow {
       service.refreshStatus()
       service.refreshFavourites()
       service.refreshNow()
+      if (service.view === "playlists") service.refreshPlaylists()
     }
     searchField.forceActiveFocus()
   }
 
   function close() {
-    if (service) service.spectrumWanted = false
+    if (service) { service.spectrumWanted = false; service.addOpen = false }
     root.visible = false
   }
 
   function dismiss() {
-    if (service) service.spectrumWanted = false
+    if (service) { service.spectrumWanted = false; service.addOpen = false }
     if (shell && typeof shell.hide === "function") shell.hide(pluginId)
     else root.visible = false
+  }
+
+  // Escape peels back one layer at a time: the add popup, then a search, then
+  // the browse depth, and only then the panel.
+  function closeStep() {
+    if (!service) { dismiss(); return }
+    if (service.addOpen) { service.addOpen = false; return }
+    if (searchField.text !== "") { searchField.text = ""; return }
+    if (service.view !== "artists" && service.view !== "playlists") { service.back(); return }
+    dismiss()
   }
 
   visible: false
@@ -59,11 +72,24 @@ PanelWindow {
     var r = s % 60
     return m + ":" + (r < 10 ? "0" + r : r)
   }
+  function fmtMs(ms) { return fmt((ms || 0) / 1000) }
+
+  function dim(a) { return Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, a) }
+  function acc(a) { return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, a) }
 
   // Click-away closes, as every other Omarchy panel does.
   MouseArea {
     anchors.fill: parent
     onClicked: root.dismiss()
+  }
+
+  // When the add-to-playlist popup closes, the keyboard must come back to the
+  // search field, or the arrows keep going to a name field nobody can see.
+  Connections {
+    target: root.service
+    function onAddOpenChanged() {
+      if (root.service && !root.service.addOpen && root.visible) searchField.forceActiveFocus()
+    }
   }
 
   Rectangle {
@@ -77,14 +103,14 @@ PanelWindow {
     id: keys
     anchors.fill: parent
     focus: true
-    Keys.onEscapePressed: root.dismiss()
+    Keys.onEscapePressed: root.closeStep()
   }
 
   Rectangle {
     id: card
     anchors.centerIn: parent
-    width: Math.min(940, parent.width - 80)
-    height: Math.min(660, parent.height - 80)
+    width: Math.min(1140, parent.width - 80)
+    height: Math.min(740, parent.height - 80)
     radius: 16
     color: Color.popups.background
     border.width: 1
@@ -123,7 +149,7 @@ PanelWindow {
             + (root.service.server ? " · " + root.service.server.replace(/^https?:\/\//, "") : "")
         }
         font.pixelSize: 11
-        color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.45)
+        color: root.dim(0.45)
       }
 
       Row {
@@ -131,11 +157,9 @@ PanelWindow {
         anchors.verticalCenter: parent.verticalCenter
         spacing: 6
 
-        // Shuffle is on by default: starring an artist is a mood, not a
-        // request to hear their first album in order.
         IconToggle {
           glyph: "󰒝"
-          tip: "Shuffle the artist"
+          tip: "Shuffle when playing an artist, album or playlist"
           on: root.service ? root.service.shuffle : true
           onTapped: if (root.service) root.service.shuffle = !root.service.shuffle
         }
@@ -143,7 +167,7 @@ PanelWindow {
         IconToggle {
           glyph: "󰑐"
           tip: "Rescan the library"
-          on: false
+          on: root.service ? root.service.indexing : false
           onTapped: if (root.service) root.service.reindex()
         }
 
@@ -186,7 +210,7 @@ PanelWindow {
                 + "Your password never passes through this plugin — Plex hands "
                 + "back a token, which is stored on this machine only."
           font.pixelSize: 12
-          color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.6)
+          color: root.dim(0.6)
         }
 
         Rectangle {
@@ -194,9 +218,9 @@ PanelWindow {
           height: 62
           radius: 10
           visible: root.service && root.service.linkCode !== ""
-          color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.12)
+          color: root.acc(0.12)
           border.width: 1
-          border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.5)
+          border.color: root.acc(0.5)
 
           Text {
             anchors.centerIn: parent
@@ -251,7 +275,7 @@ PanelWindow {
       Item {
         id: deck
         anchors { top: parent.top; bottom: parent.bottom; left: parent.left }
-        width: parent.width * 0.46
+        width: parent.width * 0.40
 
         Vinyl {
           id: vinyl
@@ -290,10 +314,9 @@ PanelWindow {
               ? [root.service.trackArtist, root.service.trackAlbum].filter(Boolean).join("  ·  ")
               : ""
             font.pixelSize: 11
-            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.55)
+            color: root.dim(0.55)
           }
 
-          // Progress, with the times either side of it.
           Item {
             width: parent.width
             height: 14
@@ -305,7 +328,7 @@ PanelWindow {
               anchors.verticalCenter: parent.verticalCenter
               text: root.fmt(root.service ? root.service.position : 0)
               font.pixelSize: 10
-              color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.45)
+              color: root.dim(0.45)
             }
 
             Text {
@@ -314,7 +337,7 @@ PanelWindow {
               anchors.verticalCenter: parent.verticalCenter
               text: root.fmt(root.service ? root.service.duration : 0)
               font.pixelSize: 10
-              color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.45)
+              color: root.dim(0.45)
             }
 
             Rectangle {
@@ -325,7 +348,7 @@ PanelWindow {
               anchors.rightMargin: 8
               height: 3
               radius: 1.5
-              color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.15)
+              color: root.dim(0.15)
 
               Rectangle {
                 height: parent.height
@@ -347,8 +370,7 @@ PanelWindow {
             }
 
             IconToggle {
-              glyph: root.service && root.service.playing && !root.service.paused
-                ? "󰏤" : "󰐊"
+              glyph: root.service && root.service.playing && !root.service.paused ? "󰏤" : "󰐊"
               tip: "Play / pause"
               on: root.service ? (root.service.playing && !root.service.paused) : false
               big: true
@@ -370,37 +392,39 @@ PanelWindow {
                 + (root.service.shuffle ? "  ·  shuffled" : "")
               : ""
             font.pixelSize: 10
-            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.35)
+            color: root.dim(0.35)
           }
         }
       }
 
-      // ---- right: search and the starred list -------------------------------
+      // ---- right: the browser -----------------------------------------------
       Item {
         id: side
         anchors { top: parent.top; bottom: parent.bottom; right: parent.right }
-        anchors.leftMargin: 18
-        width: parent.width - deck.width - 18
+        width: parent.width - deck.width - 22
+
+        readonly property string view: root.service ? root.service.view : "artists"
+        readonly property bool searchingNow: root.service ? root.service.query !== "" : false
+        readonly property bool showingAll: view === "artists" && !searchingNow
+          && root.service && root.service.browseAll
+        readonly property bool inArtists: view === "artists" || searchingNow
 
         Rectangle {
           id: searchBox
           anchors { top: parent.top; left: parent.left; right: parent.right }
           height: 34
           radius: 8
-          color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.06)
+          color: root.dim(0.06)
           border.width: 1
-          border.color: searchField.activeFocus
-            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.7)
-            : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
+          border.color: searchField.activeFocus ? root.acc(0.7) : root.dim(0.12)
 
           Text {
-            id: searchIcon
             anchors.left: parent.left
             anchors.leftMargin: 10
             anchors.verticalCenter: parent.verticalCenter
             text: "󰍉"
             font.pixelSize: 13
-            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.45)
+            color: root.dim(0.45)
           }
 
           TextField {
@@ -412,64 +436,192 @@ PanelWindow {
             placeholderText: "Search artists…"
             font.pixelSize: 12
             color: Color.foreground
-            placeholderTextColor: Qt.rgba(Color.foreground.r, Color.foreground.g,
-                                          Color.foreground.b, 0.35)
+            placeholderTextColor: root.dim(0.35)
             background: Item {}
             onTextChanged: if (root.service) root.service.search(text)
-            Keys.onEscapePressed: {
-              if (text !== "") { text = "" } else { root.dismiss() }
-            }
-            // Enter plays the top hit, so a search never needs the mouse.
-            Keys.onReturnPressed: {
-              var list = root.service ? root.service.searchResults : []
-              if (list && list.length > 0) root.service.playArtist(list[0].key)
+            // The search field keeps focus the whole time, so the keyboard
+            // drives the list from here: up/down move, Enter opens, Ctrl+Enter
+            // plays, Left goes back, Ctrl+P adds to a playlist.
+            Keys.onPressed: function (event) {
+              var list = side.activeList
+              if (!list) return
+              switch (event.key) {
+              case Qt.Key_Down:
+                list.currentIndex = Math.min(list.count - 1, list.currentIndex + 1)
+                event.accepted = true; break
+              case Qt.Key_Up:
+                list.currentIndex = Math.max(0, list.currentIndex - 1)
+                event.accepted = true; break
+              case Qt.Key_PageDown:
+                list.currentIndex = Math.min(list.count - 1, list.currentIndex + 12)
+                event.accepted = true; break
+              case Qt.Key_PageUp:
+                list.currentIndex = Math.max(0, list.currentIndex - 12)
+                event.accepted = true; break
+              case Qt.Key_Return:
+              case Qt.Key_Enter:
+                if (event.modifiers & Qt.ControlModifier) side.playCurrent()
+                else side.openCurrent()
+                event.accepted = true; break
+              case Qt.Key_Left:
+              case Qt.Key_Backspace:
+                if (searchField.text === "" && root.service) {
+                  if (root.service.view !== "artists" && root.service.view !== "playlists") {
+                    root.service.back(); event.accepted = true
+                  }
+                }
+                break
+              case Qt.Key_P:
+                if (event.modifiers & Qt.ControlModifier) { side.addCurrent(); event.accepted = true }
+                break
+              case Qt.Key_Escape:
+                root.closeStep(); event.accepted = true; break
+              }
             }
           }
         }
 
-        // Which list is showing when nothing is typed: the starred artists, or
-        // everything A-Z. Starts on the starred list once there is one.
-        property bool browseAll: root.service ? root.service.favourites.length === 0 : true
-        readonly property bool searchingNow: root.service ? root.service.query !== "" : false
-        readonly property bool showingAll: browseAll && !searchingNow
-
-        Row {
-          id: modeRow
-          anchors { top: searchBox.bottom; left: parent.left }
-          anchors.topMargin: 12
-          spacing: 6
-          visible: !side.searchingNow
-
-          ModeTab {
-            label: "Starred" + (root.service && root.service.favourites.length > 0
-              ? "  " + root.service.favourites.length : "")
-            on: !side.browseAll
-            onTapped: side.browseAll = false
+        // Which list the keyboard is steering, and what Enter does to its row.
+        readonly property var activeList: {
+          if (side.inArtists) return artistList
+          if (side.view === "albums") return albumList
+          if (side.view === "tracks") return trackList
+          if (side.view === "playlists") return playlistList
+          return null
+        }
+        // Opening an artist ends the search: the field is cleared so the albums
+        // view is not hidden behind "6 matches", and Escape then means "back".
+        function openArtistRow(item) {
+          if (!root.service || !item) return
+          if (searchField.text !== "") searchField.text = ""
+          root.service.openArtist(item)
+        }
+        function currentItem() {
+          var list = side.activeList
+          if (!list || list.currentIndex < 0 || !list.model) return null
+          return list.model[list.currentIndex] || null
+        }
+        function openCurrent() {
+          var item = currentItem()
+          if (!root.service) return
+          if (!item) {
+            // Nothing highlighted while searching: Enter takes the top hit.
+            if (side.searchingNow && root.service.searchResults.length > 0)
+              side.openArtistRow(root.service.searchResults[0])
+            return
           }
-          ModeTab {
-            label: "All artists" + (root.service ? "  " + root.service.artistCount : "")
-            on: side.browseAll
-            onTapped: side.browseAll = true
+          if (side.inArtists) side.openArtistRow(item)
+          else if (side.view === "albums") root.service.openAlbum(item)
+          else if (side.view === "playlists") root.service.openPlaylist(item)
+          else if (side.view === "tracks") {
+            if (trackList.isPlaylist) root.service.playPlaylist(trackList.head.key, item.key)
+            else root.service.playAlbum(trackList.head.key, item.key)
+          }
+        }
+        function playCurrent() {
+          var item = currentItem()
+          if (!root.service) return
+          if (!item) {
+            if (side.searchingNow && root.service.searchResults.length > 0)
+              root.service.playArtist(root.service.searchResults[0].key)
+            return
+          }
+          if (side.inArtists) root.service.playArtist(item.key)
+          else if (side.view === "albums") root.service.playAlbum(item.key, "")
+          else if (side.view === "playlists") root.service.playPlaylist(item.key, "")
+          else if (side.view === "tracks") {
+            if (trackList.isPlaylist) root.service.playPlaylist(trackList.head.key, item.key)
+            else root.service.playAlbum(trackList.head.key, item.key)
+          }
+        }
+        function addCurrent() {
+          var item = currentItem()
+          if (!root.service) return
+          if (side.view === "tracks") {
+            root.service.requestAdd(item ? [item.key] : trackList.allKeys())
+          } else if (side.view === "albums" && item) {
+            root.service.requestAddAlbum(item.key)
           }
         }
 
-        Text {
-          id: listLabel
+        // ---- nav: tabs at the top level, a breadcrumb once drilled in --------
+        Item {
+          id: nav
           anchors { top: searchBox.bottom; left: parent.left; right: parent.right }
           anchors.topMargin: 12
-          visible: side.searchingNow
-          height: modeRow.height
-          verticalAlignment: Text.AlignVCenter
-          text: root.service ? root.service.searchResults.length + " matches" : ""
-          font.pixelSize: 10
-          font.letterSpacing: 1.2
-          color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.4)
+          height: 24
+
+          Row {
+            spacing: 6
+            visible: !side.searchingNow && (side.view === "artists" || side.view === "playlists")
+
+            ModeTab {
+              label: "Starred" + (root.service && root.service.favourites.length > 0
+                ? "  " + root.service.favourites.length : "")
+              on: side.view === "artists" && root.service && !root.service.browseAll
+              onTapped: if (root.service) root.service.showTab("starred")
+            }
+            ModeTab {
+              label: "All artists" + (root.service ? "  " + root.service.artistCount : "")
+              on: side.showingAll
+              onTapped: if (root.service) root.service.showTab("all")
+            }
+            ModeTab {
+              label: "Playlists" + (root.service && root.service.playlists.length > 0
+                ? "  " + root.service.playlists.length : "")
+              on: side.view === "playlists"
+              onTapped: if (root.service) root.service.showTab("playlists")
+            }
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            visible: side.searchingNow
+            text: root.service ? root.service.searchResults.length + " matches" : ""
+            font.pixelSize: 10
+            font.letterSpacing: 1.2
+            color: root.dim(0.4)
+          }
+
+          Row {
+            spacing: 8
+            anchors.verticalCenter: parent.verticalCenter
+            visible: !side.searchingNow && (side.view === "albums" || side.view === "tracks")
+
+            RowBtn {
+              glyph: "󰁍"
+              tip: "Back"
+              onTapped: if (root.service) root.service.back()
+            }
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: {
+                if (!root.service) return ""
+                var parts = []
+                if (root.service.selectedPlaylist && side.view === "tracks") {
+                  parts.push("Playlists")
+                  parts.push(root.service.selectedPlaylist.title)
+                } else {
+                  parts.push(root.service.selectedArtist ? root.service.selectedArtist.title : "Artist")
+                  if (side.view === "tracks" && root.service.selectedAlbum)
+                    parts.push(root.service.selectedAlbum.title)
+                }
+                return parts.join("   ›   ")
+              }
+              font.pixelSize: 12
+              font.bold: true
+              elide: Text.ElideMiddle
+              width: Math.min(implicitWidth, side.width - 60)
+              color: Color.foreground
+            }
+          }
         }
 
-        // The A-Z strip. Only for the full list; a search is already narrow.
+        // ---- the A-Z strip (full artist list only) --------------------------
         Column {
           id: alphabet
-          anchors { top: modeRow.bottom; right: parent.right; bottom: parent.bottom }
+          anchors { top: nav.bottom; right: parent.right; bottom: parent.bottom }
           anchors.topMargin: 8
           width: 16
           visible: side.showingAll
@@ -490,10 +642,7 @@ PanelWindow {
                 text: modelData
                 font.pixelSize: Math.min(10, alphabet.slot * 0.8)
                 font.bold: jump.containsMouse
-                color: jump.containsMouse
-                  ? Color.accent
-                  : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b,
-                            present ? 0.5 : 0.15)
+                color: jump.containsMouse ? Color.accent : root.dim(present ? 0.5 : 0.15)
               }
 
               MouseArea {
@@ -503,42 +652,50 @@ PanelWindow {
                 enabled: present
                 onClicked: {
                   var i = root.service.letterIndex[modelData]
-                  if (i !== undefined) list.positionViewAtIndex(i, ListView.Beginning)
+                  if (i !== undefined) artistList.positionViewAtIndex(i, ListView.Beginning)
                 }
               }
             }
           }
         }
 
+        // ---- artists ---------------------------------------------------------
         ListView {
-          id: list
-          anchors { top: modeRow.bottom; left: parent.left; bottom: parent.bottom }
+          id: artistList
+          currentIndex: -1
+          highlightFollowsCurrentItem: true
+          highlightMoveDuration: 80
+          highlight: Rectangle {
+            radius: 7
+            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+            border.width: 1
+            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45)
+            z: -1
+          }
+          onModelChanged: currentIndex = -1
+          anchors { top: nav.bottom; left: parent.left; bottom: parent.bottom }
           anchors.topMargin: 8
           anchors.right: side.showingAll ? alphabet.left : parent.right
           anchors.rightMargin: side.showingAll ? 6 : 0
+          visible: side.inArtists
           clip: true
           spacing: 2
           boundsBehavior: Flickable.StopAtBounds
-          // Every delegate is 34 px, so the view can jump to any of thousands
-          // of rows without measuring its way there.
           reuseItems: true
           cacheBuffer: 400
           model: {
             if (!root.service) return []
             if (side.searchingNow) return root.service.searchResults
-            return side.browseAll ? root.service.artists : root.service.favourites
+            return root.service.browseAll ? root.service.artists : root.service.favourites
           }
 
           section.property: side.showingAll ? "letter" : ""
           section.criteria: ViewSection.FullString
           section.labelPositioning: ViewSection.InlineLabels | ViewSection.CurrentLabelAtStart
           section.delegate: Item {
-            width: list.width
+            width: artistList.width
             height: 26
-            Rectangle {
-              anchors.fill: parent
-              color: Color.popups.background
-            }
+            Rectangle { anchors.fill: parent; color: Color.popups.background }
             Text {
               anchors.left: parent.left
               anchors.leftMargin: 10
@@ -553,14 +710,14 @@ PanelWindow {
               anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
               anchors.leftMargin: 10
               height: 1
-              color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.25)
+              color: root.acc(0.25)
             }
           }
 
           ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
           delegate: Rectangle {
-            width: list.width
+            width: artistList.width
             height: 34
             radius: 7
             readonly property string itemKey: modelData && modelData.key ? String(modelData.key) : ""
@@ -570,23 +727,20 @@ PanelWindow {
               && root.service.trackArtist !== ""
               && root.service.trackArtist.toLowerCase() === itemTitle.toLowerCase()
 
-            color: rowHover.containsMouse
-              ? Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.08)
-              : (isCurrent
-                 ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.12)
-                 : "transparent")
+            color: rowHover.containsMouse ? root.dim(0.08)
+                 : (isCurrent ? root.acc(0.12) : "transparent")
 
             MouseArea {
               id: rowHover
               anchors.fill: parent
               hoverEnabled: true
-              onClicked: if (root.service) root.service.playArtist(itemKey)
+              onClicked: side.openArtistRow({ key: itemKey, title: itemTitle })
             }
 
             Text {
               anchors.left: parent.left
               anchors.leftMargin: 10
-              anchors.right: star.left
+              anchors.right: actions.left
               anchors.rightMargin: 6
               anchors.verticalCenter: parent.verticalCenter
               elide: Text.ElideRight
@@ -596,58 +750,493 @@ PanelWindow {
               color: isCurrent ? Color.accent : Color.foreground
             }
 
-            // The star is how the curated list gets built: search, star, done.
-            Text {
-              id: star
+            Row {
+              id: actions
               anchors.right: parent.right
-              anchors.rightMargin: 10
+              anchors.rightMargin: 6
               anchors.verticalCenter: parent.verticalCenter
-              // Plain Unicode stars: the Nerd Font star glyphs come out as
-              // circles in some of Omarchy's font choices.
-              text: starred ? "★" : "☆"
-              font.pixelSize: 15
-              color: starred
-                ? Color.accent
-                : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b,
-                          starHover.containsMouse ? 0.7 : 0.25)
+              spacing: 2
 
-              MouseArea {
-                id: starHover
-                anchors.centerIn: parent
-                width: 26
-                height: 26
-                hoverEnabled: true
-                onClicked: if (root.service) root.service.toggleFavourite(itemKey, itemTitle)
+              RowBtn {
+                glyph: "󰐊"
+                tip: "Play " + itemTitle
+                strong: true
+                visible: rowHover.containsMouse || isCurrent
+                onTapped: if (root.service) root.service.playArtist(itemKey)
+              }
+
+              // The star is how the curated list gets built: search, star, done.
+              RowBtn {
+                glyph: starred ? "★" : "☆"
+                tip: starred ? "Remove from starred" : "Star this artist"
+                accentOn: starred
+                onTapped: if (root.service) root.service.toggleFavourite(itemKey, itemTitle)
               }
             }
           }
 
-          // An empty starred list needs to say what to do about it.
           Text {
             anchors.centerIn: parent
             width: parent.width - 40
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
-            visible: list.count === 0 && !side.searchingNow && !side.browseAll
+            visible: artistList.count === 0 && !side.searchingNow && root.service && !root.service.browseAll
             text: "Tap the star on any artist to keep them here."
             font.pixelSize: 11
-            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.35)
+            color: root.dim(0.35)
           }
 
           Text {
             anchors.centerIn: parent
-            visible: list.count === 0 && side.searchingNow
+            visible: artistList.count === 0 && side.searchingNow
             text: "Nothing matches that."
             font.pixelSize: 11
-            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.35)
+            color: root.dim(0.35)
           }
 
           Text {
             anchors.centerIn: parent
-            visible: list.count === 0 && side.showingAll
-            text: root.service && root.service.indexing ? "Indexing the library…" : "No index yet — press the rescan button above."
+            visible: artistList.count === 0 && side.showingAll
+            text: root.service && root.service.indexing ? "Indexing the library…"
+                                                        : "No index yet — press the rescan button above."
             font.pixelSize: 11
-            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.35)
+            color: root.dim(0.35)
+          }
+        }
+
+        // ---- albums of an artist ---------------------------------------------
+        ListView {
+          id: albumList
+          currentIndex: -1
+          highlightFollowsCurrentItem: true
+          highlightMoveDuration: 80
+          highlight: Rectangle {
+            radius: 7
+            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+            border.width: 1
+            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45)
+            z: -1
+          }
+          onModelChanged: currentIndex = -1
+          anchors { top: nav.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
+          anchors.topMargin: 8
+          visible: !side.searchingNow && side.view === "albums"
+          clip: true
+          spacing: 2
+          boundsBehavior: Flickable.StopAtBounds
+          model: root.service ? root.service.albums : []
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          header: Item {
+            width: albumList.width
+            height: 44
+            Row {
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 8
+              TextBtn {
+                label: "󰐊  Play all"
+                accent: true
+                onTapped: if (root.service && root.service.selectedArtist)
+                  root.service.playArtist(root.service.selectedArtist.key)
+              }
+              RowBtn {
+                glyph: "★"
+                tip: "Star this artist"
+                accentOn: root.service && root.service.selectedArtist
+                  && root.service.isFavourite(root.service.selectedArtist.key)
+                onTapped: if (root.service && root.service.selectedArtist)
+                  root.service.toggleFavourite(root.service.selectedArtist.key,
+                                               root.service.selectedArtist.title)
+              }
+            }
+            Text {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.service
+                ? (root.service.loadingAlbums ? "loading…"
+                   : root.service.albums.length + (root.service.albums.length === 1 ? " album" : " albums"))
+                : ""
+              font.pixelSize: 10
+              font.letterSpacing: 1.2
+              color: root.dim(0.4)
+            }
+          }
+
+          delegate: Rectangle {
+            width: albumList.width
+            height: 52
+            radius: 8
+            readonly property var album: modelData
+            color: albumHover.containsMouse ? root.dim(0.08) : "transparent"
+
+            MouseArea {
+              id: albumHover
+              anchors.fill: parent
+              hoverEnabled: true
+              onClicked: if (root.service) root.service.openAlbum(album)
+            }
+
+            CoverThumb {
+              id: albumArt
+              anchors.left: parent.left
+              anchors.leftMargin: 6
+              anchors.verticalCenter: parent.verticalCenter
+              size: 40
+              source: album && album.artUrl ? album.artUrl : ""
+            }
+
+            Column {
+              anchors.left: albumArt.right
+              anchors.leftMargin: 10
+              anchors.right: albumActions.left
+              anchors.rightMargin: 6
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 2
+              Text {
+                width: parent.width
+                elide: Text.ElideRight
+                text: album ? album.title : ""
+                font.pixelSize: 12
+                font.bold: true
+                color: Color.foreground
+              }
+              Text {
+                width: parent.width
+                elide: Text.ElideRight
+                text: album
+                  ? [album.year ? String(album.year) : "",
+                     album.tracks ? album.tracks + " tracks" : ""].filter(Boolean).join("  ·  ")
+                  : ""
+                font.pixelSize: 10
+                color: root.dim(0.5)
+              }
+            }
+
+            Row {
+              id: albumActions
+              anchors.right: parent.right
+              anchors.rightMargin: 6
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 2
+              visible: albumHover.containsMouse
+              RowBtn {
+                glyph: "󰐊"; tip: "Play this album"; strong: true
+                onTapped: if (root.service) root.service.playAlbum(album.key, "")
+              }
+              RowBtn {
+                glyph: "󰐕"; tip: "Add this album to a playlist"
+                onTapped: if (root.service) root.service.requestAddAlbum(album.key)
+              }
+            }
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: albumList.count === 0 && root.service && !root.service.loadingAlbums
+            text: "No albums here."
+            font.pixelSize: 11
+            color: root.dim(0.35)
+          }
+        }
+
+        // ---- tracks of an album or playlist ----------------------------------
+        ListView {
+          id: trackList
+          currentIndex: -1
+          highlightFollowsCurrentItem: true
+          highlightMoveDuration: 80
+          highlight: Rectangle {
+            radius: 7
+            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+            border.width: 1
+            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45)
+            z: -1
+          }
+          onModelChanged: currentIndex = -1
+          anchors { top: nav.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
+          anchors.topMargin: 8
+          visible: !side.searchingNow && side.view === "tracks"
+          clip: true
+          spacing: 1
+          boundsBehavior: Flickable.StopAtBounds
+          model: root.service ? root.service.tracks : []
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          readonly property bool isPlaylist: root.service && root.service.selectedPlaylist !== null
+          readonly property var head: root.service
+            ? (isPlaylist ? root.service.selectedPlaylist : root.service.selectedAlbum) : null
+
+          function allKeys() {
+            var t = root.service ? root.service.tracks : []
+            var out = []
+            for (var i = 0; i < t.length; i++) out.push(t[i].key)
+            return out
+          }
+
+          header: Item {
+            width: trackList.width
+            height: 96
+
+            CoverThumb {
+              id: headArt
+              anchors.left: parent.left
+              anchors.leftMargin: 6
+              anchors.verticalCenter: parent.verticalCenter
+              size: 72
+              source: trackList.head && trackList.head.artUrl ? trackList.head.artUrl : ""
+            }
+
+            Column {
+              anchors.left: headArt.right
+              anchors.leftMargin: 12
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 6
+
+              Text {
+                width: parent.width
+                elide: Text.ElideRight
+                text: trackList.head ? trackList.head.title : ""
+                font.pixelSize: 14
+                font.bold: true
+                color: Color.foreground
+              }
+              Text {
+                width: parent.width
+                elide: Text.ElideRight
+                text: {
+                  if (!root.service) return ""
+                  var n = root.service.tracks.length
+                  var bits = []
+                  if (!trackList.isPlaylist && root.service.selectedArtist)
+                    bits.push(root.service.selectedArtist.title)
+                  if (trackList.head && trackList.head.year) bits.push(String(trackList.head.year))
+                  bits.push(root.service.loadingTracks ? "loading…" : n + (n === 1 ? " track" : " tracks"))
+                  return bits.join("  ·  ")
+                }
+                font.pixelSize: 11
+                color: root.dim(0.5)
+              }
+              Row {
+                spacing: 6
+                TextBtn {
+                  label: "󰐊  Play"
+                  accent: true
+                  onTapped: {
+                    if (!root.service || !trackList.head) return
+                    if (trackList.isPlaylist) root.service.playPlaylist(trackList.head.key, "")
+                    else root.service.playAlbum(trackList.head.key, "")
+                  }
+                }
+                TextBtn {
+                  label: "󰐕  Add all to playlist"
+                  onTapped: if (root.service) root.service.requestAdd(trackList.allKeys())
+                }
+              }
+            }
+          }
+
+          delegate: Rectangle {
+            width: trackList.width
+            height: 32
+            radius: 6
+            readonly property var track: modelData
+            readonly property bool isCurrent: root.service && root.service.playing
+              && root.service.trackTitle !== "" && track
+              && root.service.trackTitle === track.title
+              && (root.service.trackAlbum === track.album || root.service.trackAlbum === "")
+            color: trackHover.containsMouse ? root.dim(0.08) : (isCurrent ? root.acc(0.12) : "transparent")
+
+            MouseArea {
+              id: trackHover
+              anchors.fill: parent
+              hoverEnabled: true
+              // Clicking a track plays the album or playlist from that track on.
+              onClicked: {
+                if (!root.service || !trackList.head) return
+                if (trackList.isPlaylist) root.service.playPlaylist(trackList.head.key, track.key)
+                else root.service.playAlbum(trackList.head.key, track.key)
+              }
+            }
+
+            Text {
+              id: num
+              anchors.left: parent.left
+              anchors.leftMargin: 10
+              anchors.verticalCenter: parent.verticalCenter
+              width: 22
+              horizontalAlignment: Text.AlignRight
+              text: track ? (trackList.isPlaylist ? String(index + 1) : String(track.index || index + 1)) : ""
+              font.pixelSize: 10
+              color: isCurrent ? Color.accent : root.dim(0.4)
+            }
+
+            Text {
+              anchors.left: num.right
+              anchors.leftMargin: 10
+              anchors.right: dur.left
+              anchors.rightMargin: 8
+              anchors.verticalCenter: parent.verticalCenter
+              elide: Text.ElideRight
+              text: track
+                ? (trackList.isPlaylist && track.artist ? track.title + "  —  " + track.artist : track.title)
+                : ""
+              font.pixelSize: 12
+              font.bold: isCurrent
+              color: isCurrent ? Color.accent : Color.foreground
+            }
+
+            Text {
+              id: dur
+              anchors.right: trackActions.left
+              anchors.rightMargin: 8
+              anchors.verticalCenter: parent.verticalCenter
+              text: track ? root.fmtMs(track.duration) : ""
+              font.pixelSize: 10
+              color: root.dim(0.4)
+              visible: !trackHover.containsMouse
+            }
+
+            Row {
+              id: trackActions
+              anchors.right: parent.right
+              anchors.rightMargin: 6
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 2
+              width: trackHover.containsMouse ? implicitWidth : 0
+              clip: true
+              RowBtn {
+                glyph: "󰐊"; tip: "Play from here"; strong: true
+                visible: trackHover.containsMouse
+                onTapped: {
+                  if (!root.service || !trackList.head) return
+                  if (trackList.isPlaylist) root.service.playPlaylist(trackList.head.key, track.key)
+                  else root.service.playAlbum(trackList.head.key, track.key)
+                }
+              }
+              RowBtn {
+                glyph: "󰐕"; tip: "Add to a playlist"
+                visible: trackHover.containsMouse
+                onTapped: if (root.service) root.service.requestAdd([track.key])
+              }
+            }
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: trackList.count === 0 && root.service && !root.service.loadingTracks
+            text: "No tracks here."
+            font.pixelSize: 11
+            color: root.dim(0.35)
+          }
+        }
+
+        // ---- playlists ---------------------------------------------------------
+        ListView {
+          id: playlistList
+          currentIndex: -1
+          highlightFollowsCurrentItem: true
+          highlightMoveDuration: 80
+          highlight: Rectangle {
+            radius: 7
+            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+            border.width: 1
+            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45)
+            z: -1
+          }
+          onModelChanged: currentIndex = -1
+          anchors { top: nav.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
+          anchors.topMargin: 8
+          visible: !side.searchingNow && side.view === "playlists"
+          clip: true
+          spacing: 2
+          boundsBehavior: Flickable.StopAtBounds
+          model: root.service ? root.service.playlists : []
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          header: Item {
+            width: playlistList.width
+            height: 30
+            Text {
+              anchors.left: parent.left
+              anchors.leftMargin: 10
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Your Plex playlists. Use the  󰐕  on any track or album to add to one, or to start a new one."
+              font.pixelSize: 10
+              color: root.dim(0.4)
+              width: parent.width - 20
+              elide: Text.ElideRight
+            }
+          }
+
+          delegate: Rectangle {
+            width: playlistList.width
+            height: 48
+            radius: 8
+            readonly property var pl: modelData
+            color: plHover.containsMouse ? root.dim(0.08) : "transparent"
+
+            MouseArea {
+              id: plHover
+              anchors.fill: parent
+              hoverEnabled: true
+              onClicked: if (root.service) root.service.openPlaylist(pl)
+            }
+
+            CoverThumb {
+              id: plArt
+              anchors.left: parent.left
+              anchors.leftMargin: 6
+              anchors.verticalCenter: parent.verticalCenter
+              size: 36
+              source: pl && pl.artUrl ? pl.artUrl : ""
+              fallbackGlyph: "󰲸"
+            }
+
+            Column {
+              anchors.left: plArt.right
+              anchors.leftMargin: 10
+              anchors.right: plActions.left
+              anchors.rightMargin: 6
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: 2
+              Text {
+                width: parent.width
+                elide: Text.ElideRight
+                text: pl ? pl.title : ""
+                font.pixelSize: 12
+                font.bold: true
+                color: Color.foreground
+              }
+              Text {
+                width: parent.width
+                text: pl ? pl.tracks + (pl.tracks === 1 ? " track" : " tracks")
+                           + (pl.duration ? "  ·  " + root.fmtMs(pl.duration) : "") : ""
+                font.pixelSize: 10
+                color: root.dim(0.5)
+              }
+            }
+
+            Row {
+              id: plActions
+              anchors.right: parent.right
+              anchors.rightMargin: 6
+              anchors.verticalCenter: parent.verticalCenter
+              visible: plHover.containsMouse
+              RowBtn {
+                glyph: "󰐊"; tip: "Play this playlist"; strong: true
+                onTapped: if (root.service) root.service.playPlaylist(pl.key, "")
+              }
+            }
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: playlistList.count === 0 && root.service && !root.service.loadingPlaylists
+            text: "No playlists yet — add a track to start one."
+            font.pixelSize: 11
+            color: root.dim(0.35)
           }
         }
       }
@@ -659,7 +1248,7 @@ PanelWindow {
       id: meters
       anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
       anchors.margins: 18
-      height: 92
+      height: 132
       visible: root.service ? root.service.linked : false
 
       Text {
@@ -669,7 +1258,7 @@ PanelWindow {
         text: "LOW"
         font.pixelSize: 9
         font.letterSpacing: 1.4
-        color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.3)
+        color: root.dim(0.3)
       }
 
       Text {
@@ -678,7 +1267,7 @@ PanelWindow {
         text: "HIGH"
         font.pixelSize: 9
         font.letterSpacing: 1.4
-        color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.3)
+        color: root.dim(0.3)
       }
 
       Spectrum {
@@ -686,6 +1275,189 @@ PanelWindow {
         anchors.topMargin: 6
         levels: root.service ? root.service.levels : []
         live: root.service ? (root.service.levels && root.service.levels.length > 0) : false
+      }
+    }
+
+    // ---- toast ----------------------------------------------------------------
+
+    Rectangle {
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: meters.top
+      anchors.bottomMargin: 8
+      visible: root.service && root.service.toast !== ""
+      width: toastText.implicitWidth + 28
+      height: 30
+      radius: 15
+      color: root.acc(0.18)
+      border.width: 1
+      border.color: root.acc(0.55)
+      Text {
+        id: toastText
+        anchors.centerIn: parent
+        text: root.service ? root.service.toast : ""
+        font.pixelSize: 11
+        color: Color.foreground
+      }
+    }
+
+    // ---- add to playlist --------------------------------------------------------
+
+    Item {
+      id: addLayer
+      anchors.fill: parent
+      visible: root.service ? root.service.addOpen : false
+
+      MouseArea {
+        anchors.fill: parent
+        onClicked: if (root.service) root.service.addOpen = false
+      }
+      Rectangle { anchors.fill: parent; radius: card.radius; color: Qt.rgba(0, 0, 0, 0.45) }
+
+      Rectangle {
+        id: addPopup
+        anchors.centerIn: parent
+        width: 380
+        height: Math.min(460, card.height - 80)
+        radius: 12
+        color: Color.popups.background
+        border.width: 1
+        border.color: root.acc(0.6)
+        MouseArea { anchors.fill: parent }
+
+        onVisibleChanged: if (visible) { newName.text = ""; newName.forceActiveFocus() }
+
+        Text {
+          id: addTitle
+          anchors { top: parent.top; left: parent.left; right: parent.right }
+          anchors.margins: 16
+          text: {
+            var n = root.service ? root.service.pendingAdd.length : 0
+            return "Add " + n + (n === 1 ? " track" : " tracks") + " to…"
+          }
+          font.pixelSize: 14
+          font.bold: true
+          color: Color.foreground
+        }
+
+        ListView {
+          id: addList
+          currentIndex: -1
+          highlightMoveDuration: 80
+          highlight: Rectangle {
+            radius: 7
+            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.14)
+            border.width: 1
+            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.5)
+            z: -1
+          }
+          onModelChanged: currentIndex = -1
+          anchors { top: addTitle.bottom; left: parent.left; right: parent.right; bottom: newRow.top }
+          anchors.margins: 10
+          anchors.topMargin: 12
+          clip: true
+          spacing: 2
+          model: root.service ? root.service.playlists : []
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          delegate: Rectangle {
+            width: addList.width
+            height: 36
+            radius: 7
+            color: addHover.containsMouse ? root.acc(0.14) : "transparent"
+            MouseArea {
+              id: addHover
+              anchors.fill: parent
+              hoverEnabled: true
+              enabled: root.service ? !root.service.addBusy : false
+              onClicked: if (root.service) root.service.addToPlaylist(modelData.key)
+            }
+            Text {
+              anchors.left: parent.left
+              anchors.leftMargin: 10
+              anchors.right: cnt.left
+              anchors.verticalCenter: parent.verticalCenter
+              elide: Text.ElideRight
+              text: modelData ? modelData.title : ""
+              font.pixelSize: 12
+              color: Color.foreground
+            }
+            Text {
+              id: cnt
+              anchors.right: parent.right
+              anchors.rightMargin: 10
+              anchors.verticalCenter: parent.verticalCenter
+              text: modelData ? modelData.tracks : ""
+              font.pixelSize: 10
+              color: root.dim(0.4)
+            }
+          }
+
+          Text {
+            anchors.centerIn: parent
+            visible: addList.count === 0
+            text: root.service && root.service.loadingPlaylists ? "loading…" : "No playlists yet"
+            font.pixelSize: 11
+            color: root.dim(0.35)
+          }
+        }
+
+        // A new playlist is made from the pending tracks, so it is never empty.
+        Item {
+          id: newRow
+          anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+          anchors.margins: 12
+          height: 40
+
+          Rectangle {
+            anchors { left: parent.left; right: createBtn.left; top: parent.top; bottom: parent.bottom }
+            anchors.rightMargin: 8
+            radius: 8
+            color: root.dim(0.06)
+            border.width: 1
+            border.color: newName.activeFocus ? root.acc(0.7) : root.dim(0.12)
+            TextField {
+              id: newName
+              anchors.fill: parent
+              anchors.leftMargin: 10
+              anchors.rightMargin: 6
+              verticalAlignment: TextInput.AlignVCenter
+              placeholderText: "New playlist name…"
+              font.pixelSize: 12
+              color: Color.foreground
+              placeholderTextColor: root.dim(0.35)
+              background: Item {}
+              // Arrows pick an existing playlist, Enter adds to it; with
+              // nothing picked, Enter creates the named one.
+              Keys.onPressed: function (event) {
+                if (event.key === Qt.Key_Down) {
+                  addList.currentIndex = Math.min(addList.count - 1, addList.currentIndex + 1)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Up) {
+                  addList.currentIndex = Math.max(-1, addList.currentIndex - 1)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                  if (!root.service) return
+                  if (addList.currentIndex >= 0 && addList.model[addList.currentIndex])
+                    root.service.addToPlaylist(addList.model[addList.currentIndex].key)
+                  else root.service.createPlaylist(text)
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Escape) {
+                  root.closeStep(); event.accepted = true
+                }
+              }
+            }
+          }
+
+          TextBtn {
+            id: createBtn
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            label: root.service && root.service.addBusy ? "…" : "Create"
+            accent: true
+            enabled: newName.text.trim() !== "" && root.service && !root.service.addBusy
+            onTapped: if (root.service) root.service.createPlaylist(newName.text)
+          }
+        }
       }
     }
   }
@@ -703,15 +1475,9 @@ PanelWindow {
     width: big ? 38 : 26
     height: big ? 38 : 26
     radius: width / 2
-    color: on
-      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-      : (hover.containsMouse
-         ? Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.10)
-         : "transparent")
+    color: on ? root.acc(0.18) : (hover.containsMouse ? root.dim(0.10) : "transparent")
     border.width: 1
-    border.color: on
-      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.55)
-      : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.14)
+    border.color: on ? root.acc(0.55) : root.dim(0.14)
 
     Text {
       anchors.centerIn: parent
@@ -732,6 +1498,73 @@ PanelWindow {
     ToolTip.delay: 450
   }
 
+  // A small round button for list rows.
+  component RowBtn: Rectangle {
+    id: rb
+    property string glyph: ""
+    property string tip: ""
+    property bool strong: false
+    property bool accentOn: false
+    signal tapped()
+
+    width: 26
+    height: 26
+    radius: 13
+    color: rbHover.containsMouse ? root.acc(strong ? 0.28 : 0.14) : (strong ? root.acc(0.12) : "transparent")
+    border.width: strong ? 1 : 0
+    border.color: root.acc(0.5)
+
+    Text {
+      anchors.centerIn: parent
+      text: rb.glyph
+      font.pixelSize: 13
+      color: rb.accentOn || rb.strong ? Color.accent : root.dim(rbHover.containsMouse ? 0.9 : 0.4)
+    }
+
+    MouseArea {
+      id: rbHover
+      anchors.fill: parent
+      hoverEnabled: true
+      onClicked: function (mouse) { mouse.accepted = true; rb.tapped() }
+    }
+
+    ToolTip.visible: rbHover.containsMouse && rb.tip !== ""
+    ToolTip.text: rb.tip
+    ToolTip.delay: 500
+  }
+
+  // Album or playlist artwork, square with rounded corners, straight from Plex.
+  component CoverThumb: Rectangle {
+    id: ct
+    property int size: 40
+    property string source: ""
+    property string fallbackGlyph: "󰃽"
+    width: size
+    height: size
+    radius: 5
+    color: root.dim(0.08)
+    clip: true
+
+    Image {
+      anchors.fill: parent
+      source: ct.source
+      fillMode: Image.PreserveAspectCrop
+      asynchronous: true
+      cache: true
+      smooth: true
+      sourceSize.width: ct.size * 2
+      sourceSize.height: ct.size * 2
+      visible: status === Image.Ready
+    }
+    Text {
+      anchors.centerIn: parent
+      text: ct.fallbackGlyph
+      font.pixelSize: ct.size * 0.45
+      color: root.dim(0.3)
+      visible: ct.source === ""
+    }
+  }
+
   component ModeTab: Rectangle {
     id: tab
     property string label: ""
@@ -741,23 +1574,16 @@ PanelWindow {
     implicitWidth: tabText.implicitWidth + 20
     implicitHeight: 24
     radius: 12
-    color: on
-      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.16)
-      : (tabHover.containsMouse
-         ? Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.08)
-         : "transparent")
+    color: on ? root.acc(0.16) : (tabHover.containsMouse ? root.dim(0.08) : "transparent")
     border.width: 1
-    border.color: on
-      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.5)
-      : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
+    border.color: on ? root.acc(0.5) : root.dim(0.12)
 
     Text {
       id: tabText
       anchors.centerIn: parent
       text: tab.label
       font.pixelSize: 11
-      color: tab.on ? Color.accent
-                    : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.6)
+      color: tab.on ? Color.accent : root.dim(0.6)
     }
 
     MouseArea {
@@ -779,16 +1605,10 @@ PanelWindow {
     implicitHeight: 32
     radius: 8
     opacity: enabled ? 1 : 0.45
-    color: accent
-      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b,
-                btnHover.containsMouse ? 0.28 : 0.18)
-      : (btnHover.containsMouse
-         ? Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
-         : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.06))
+    color: accent ? root.acc(btnHover.containsMouse ? 0.28 : 0.18)
+                  : (btnHover.containsMouse ? root.dim(0.12) : root.dim(0.06))
     border.width: 1
-    border.color: accent
-      ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.6)
-      : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.16)
+    border.color: accent ? root.acc(0.6) : root.dim(0.16)
 
     Text {
       id: caption

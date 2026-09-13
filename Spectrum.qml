@@ -5,8 +5,11 @@ import qs.Commons
 // fed by cava. Peak caps hang at the loudest point each bar has reached and
 // sink back slowly, the way the LEDs on a hardware meter bridge do.
 //
-// Colours come entirely from the active Omarchy theme, so the meters belong to
-// whatever the desktop is wearing instead of being a green strip bolted on.
+// Colour is still entirely the theme's, but used in two directions at once:
+// the hue walks from the accent colour at the bass end to the urgent colour at
+// the treble end, and each bar brightens with level, with a soft glow behind
+// it. So the band reads as one instrument rather than a row of identical
+// sticks, and it re-skins with the theme.
 Item {
   id: root
 
@@ -18,6 +21,16 @@ Item {
 
   // Peak caps, kept in plain arrays and pushed to the repeater on each frame.
   property var peaks: []
+
+  // Mix two theme colours, then brighten with level.
+  function tone(pos, level) {
+    var a = Color.accent, u = Color.urgent, f = Color.foreground
+    var t = Math.max(0, Math.min(1, pos))
+    var r = a.r + (u.r - a.r) * t, g = a.g + (u.g - a.g) * t, b = a.b + (u.b - a.b) * t
+    // Loud bars lift toward the foreground colour so peaks look hot.
+    var k = Math.max(0, Math.min(1, (level - 60) / 40)) * 0.55
+    return Qt.rgba(r + (f.r - r) * k, g + (f.g - g) * k, b + (f.b - b) * k, 1)
+  }
 
   onLevelsChanged: {
     if (!levels || levels.length === 0) return
@@ -61,6 +74,7 @@ Item {
         width: (root.width - root.gap * (root.count - 1)) / root.count
         height: root.height
 
+        readonly property real pos: root.count > 1 ? index / (root.count - 1) : 0
         readonly property real value: {
           if (!root.live || !root.levels || index >= root.levels.length) return 0
           return Math.max(0, Math.min(100, root.levels[index]))
@@ -69,6 +83,7 @@ Item {
           if (!root.live || !root.peaks || index >= root.peaks.length) return 0
           return Math.max(0, Math.min(100, root.peaks[index]))
         }
+        readonly property color hue: root.tone(pos, value)
 
         // The floor: a bar is always visible so the band reads as an instrument
         // at rest rather than as empty space.
@@ -77,8 +92,18 @@ Item {
           width: parent.width
           height: Math.max(1.5, parent.height * 0.012)
           radius: width > 3 ? 1 : 0
-          color: Qt.rgba(Color.foreground.r, Color.foreground.g,
-                         Color.foreground.b, 0.16)
+          color: Qt.rgba(slot.hue.r, slot.hue.g, slot.hue.b, root.live ? 0.35 : 0.18)
+        }
+
+        // Glow: the same bar, wider and translucent, behind the solid one.
+        Rectangle {
+          anchors.bottom: parent.bottom
+          anchors.horizontalCenter: parent.horizontalCenter
+          width: parent.width + root.gap * 2
+          height: bar.height + 6
+          radius: 3
+          color: Qt.rgba(slot.hue.r, slot.hue.g, slot.hue.b, 0.16)
+          visible: slot.value > 2
         }
 
         Rectangle {
@@ -88,13 +113,10 @@ Item {
           height: Math.max(0, parent.height * (slot.value / 100))
           radius: width > 3 ? 1.5 : 0
           gradient: Gradient {
-            // Quiet passages sit in the accent colour; only the loud peaks
-            // reach the theme's urgent colour, so clipping is visible.
-            GradientStop { position: 0.0; color: Color.urgent }
-            GradientStop { position: 0.45; color: Color.accent }
+            GradientStop { position: 0.0; color: slot.hue }
             GradientStop {
               position: 1.0
-              color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.55)
+              color: Qt.rgba(slot.hue.r, slot.hue.g, slot.hue.b, 0.45)
             }
           }
         }
@@ -107,7 +129,7 @@ Item {
           y: Math.max(0, parent.height - parent.height * (slot.peak / 100) - height)
           visible: slot.peak > 1
           color: Color.foreground
-          opacity: 0.75
+          opacity: 0.8
         }
       }
     }

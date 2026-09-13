@@ -16,7 +16,7 @@ BarWidget {
   readonly property bool showTrack: setting("showTrack", true)
   readonly property int maxTrackChars: setting("maxTrackChars", 28)
   readonly property bool showMeter: setting("showMeter", true)
-  readonly property int meterBars: setting("meterBars", 16)
+  readonly property int meterBars: setting("meterBars", 40)
   readonly property bool playing: service ? service.playing : false
   readonly property bool paused: service ? service.paused : false
 
@@ -127,15 +127,25 @@ BarWidget {
     anchors.verticalCenter: parent.verticalCenter
     visible: root.meterLive
     readonly property int bars: root.mini.length
-    readonly property real barW: 2
+    readonly property real barW: 3
     readonly property real gap: 1
-    width: bars > 0 ? bars * (barW + gap) - gap + 8 : 0
-    height: Math.max(8, root.barSize - 12)
+    width: bars > 0 ? bars * (barW + gap) - gap + 10 : 0
+    height: Math.max(10, root.barSize - 8)
+
+    // Same colour logic as the panel band: accent at the bass end walking to
+    // urgent at the treble end, lifting toward the foreground when loud.
+    function tone(pos, level) {
+      var a = Color.accent, u = Color.urgent, f = Color.foreground
+      var t = Math.max(0, Math.min(1, pos))
+      var r = a.r + (u.r - a.r) * t, g = a.g + (u.g - a.g) * t, b = a.b + (u.b - a.b) * t
+      var k = Math.max(0, Math.min(1, (level - 60) / 40)) * 0.6
+      return Qt.rgba(r + (f.r - r) * k, g + (f.g - g) * k, b + (f.b - b) * k, 1)
+    }
 
     Row {
       anchors.fill: parent
-      anchors.leftMargin: 4
-      anchors.rightMargin: 4
+      anchors.leftMargin: 5
+      anchors.rightMargin: 5
       spacing: meter.gap
 
       Repeater {
@@ -144,15 +154,26 @@ BarWidget {
           width: meter.barW
           height: meter.height
           readonly property real v: index < root.mini.length ? root.mini[index] : 0
+          readonly property color hue: meter.tone(meter.bars > 1 ? index / (meter.bars - 1) : 0, v)
 
           Rectangle {
             anchors.bottom: parent.bottom
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: parent.width + 2
+            height: bar.height + 3
+            radius: 1.5
+            color: Qt.rgba(hue.r, hue.g, hue.b, 0.18)
+            visible: v > 2
+          }
+
+          Rectangle {
+            id: bar
+            anchors.bottom: parent.bottom
             width: parent.width
             height: Math.max(1, parent.height * Math.min(1, v / 100))
-            radius: 0.5
-            // Loud bars tip into the theme's urgent colour, as in the panel.
-            color: v > 78 ? Color.urgent : (root.bar ? root.bar.barForeground : Color.accent)
-            opacity: v > 78 ? 1 : 0.85
+            radius: 1
+            color: hue
+            opacity: 0.95
           }
         }
       }
