@@ -630,23 +630,40 @@ def cmd_link(args) -> None:
 
 
 def cmd_server(args) -> None:
-    """List, add or pin the Plex address — the manual path for Tailscale."""
+    """List, add, remove or pin the Plex address.
+
+    The manual path matters for anyone whose server is not where plex.tv
+    thinks it is: a VPN address, a reverse proxy, a LAN name.
+    """
     settings = read_json(SETTINGS_FILE, {})
     servers = settings.get("servers") or []
 
-    if args.add:
-        uri = args.add.rstrip("/")
+    def normalise(uri: str) -> str:
+        uri = (uri or "").strip().rstrip("/")
+        if uri and "://" not in uri:
+            uri = "http://" + uri
+        if uri.count(":") == 1:              # scheme only, no port given
+            uri += ":32400"
+        return uri
+
+    if args.add or args.use:
+        uri = normalise(args.add or args.use)
         if not uri.startswith(("http://", "https://")):
-            die("address must start with http:// or https://")
+            die("address must look like http://host:32400")
+        plex = Plex()
+        rtt = plex.reachable(uri, timeout=4.0)
         if uri not in servers:
             servers.insert(0, uri)
         settings["servers"] = servers
-        # Force a re-probe so a newly added address is picked up immediately.
-        settings.pop("baseUrl", None)
+        if rtt is not None:
+            # Pin it: this is now the address, until it stops answering.
+            settings["baseUrl"] = uri
+        elif settings.get("baseUrl") == uri:
+            settings.pop("baseUrl", None)
         write_json(SETTINGS_FILE, settings)
-        plex = Plex()
-        base = plex.resolve_base(force=True)
-        emit({"servers": servers, "active": base})
+        emit({"servers": servers, "active": settings.get("baseUrl"),
+              "added": uri, "reachable": rtt is not None,
+              "ms": round(rtt * 1000, 1) if rtt is not None else None})
         return
 
     if args.remove:
@@ -659,11 +676,61 @@ def cmd_server(args) -> None:
 
     plex = Plex()
     found = plex.discover()
-    for cand in found:
-        rtt = plex.reachable(cand["uri"], timeout=2.0)
+    # Probe every candidate at once. plex.tv can list eight addresses for one
+    # server, most of them dead from where you sit; in series that is a
+    # sixteen-second wait for a settings page.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(12, len(found)))) as pool:
+        rtts = list(pool.map(lambda c: plex.reachable(c["uri"], timeout=2.0), found))
+    for cand, rtt in zip(found, rtts):
         cand["reachable"] = rtt is not None
         cand["ms"] = round(rtt * 1000, 1) if rtt is not None else None
     emit({"servers": found, "active": settings.get("baseUrl")})
+
+
+def cmd_account(args) -> None:
+    """Who is linked, from plex.tv. The username is cached; nothing else is."""
+    auth = read_json(AUTH_FILE, {})
+    if not auth.get("authToken"):
+        emit({"linked": False})
+        return
+    try:
+        user = plex_tv_request("/api/v2/user", auth.get("clientIdentifier", ""),
+                               auth["authToken"])
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            # The token has been revoked from the Plex side.
+            emit({"linked": True, "valid": False, "username": auth.get("username", "")})
+            return
+        raise
+    username = user.get("username") or user.get("title") or ""
+    if username and username != auth.get("username"):
+        auth["username"] = username
+        write_json(AUTH_FILE, auth)
+    emit({"linked": True, "valid": True, "username": username,
+          "title": user.get("title") or username})
+
+
+def cmd_sections(args) -> None:
+    """The music libraries on the server; pick which one the plugin indexes."""
+    plex = Plex()
+    plex.resolve_base()
+    if args.use:
+        plex.settings["musicSection"] = str(args.use)
+        write_json(SETTINGS_FILE, plex.settings)
+        # The index belongs to the old section; it is rebuilt on demand.
+        try:
+            os.unlink(ARTISTS_FILE)
+        except OSError:
+            pass
+    data = plex.get("/library/sections")
+    out = []
+    for d in data.get("MediaContainer", {}).get("Directory", []) or []:
+        if d.get("type") != "artist":
+            continue
+        out.append({"key": str(d.get("key")), "title": d.get("title") or "",
+                    "active": str(d.get("key")) == str(plex.settings.get("musicSection") or "")})
+    emit({"sections": out, "active": plex.settings.get("musicSection")})
 
 
 def cmd_art(args) -> None:
@@ -981,8 +1048,15 @@ def main() -> None:
     p.add_argument("--add", metavar="URL",
                    help="a Plex address, e.g. a LAN host or a VPN address such "
                         "as http://100.64.0.10:32400 on a Tailscale tailnet")
+    p.add_argument("--use", metavar="URL", help="add and pin this address")
     p.add_argument("--remove")
     p.set_defaults(func=cmd_server)
+
+    sub.add_parser("account", help="who is linked").set_defaults(func=cmd_account)
+
+    p = sub.add_parser("sections", help="music libraries on the server")
+    p.add_argument("--use", metavar="KEY", help="index this library from now on")
+    p.set_defaults(func=cmd_sections)
 
     p = sub.add_parser("art")
     p.add_argument("thumb", help="Plex thumb path from a track or artist")

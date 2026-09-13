@@ -53,6 +53,7 @@ PanelWindow {
     if (!service) { dismiss(); return }
     if (service.addOpen) { service.addOpen = false; return }
     if (searchField.text !== "") { searchField.text = ""; return }
+    if (service.view === "settings") { service.view = "artists"; searchField.forceActiveFocus(); return }
     if (service.view !== "artists" && service.view !== "playlists") { service.back(); return }
     dismiss()
   }
@@ -154,6 +155,17 @@ PanelWindow {
           tip: "Shuffle when playing an artist, album or playlist"
           on: root.service ? root.service.shuffle : true
           onTapped: if (root.service) root.service.shuffle = !root.service.shuffle
+        }
+
+        IconToggle {
+          glyph: "󰒓"
+          tip: "Settings — account, server address, library"
+          on: root.service ? root.service.view === "settings" : false
+          onTapped: {
+            if (!root.service) return
+            if (root.service.view === "settings") { root.service.view = "artists"; searchField.forceActiveFocus() }
+            else { root.service.openSettings(); addressField.forceActiveFocus() }
+          }
         }
 
         IconToggle {
@@ -278,8 +290,15 @@ PanelWindow {
           spinning: root.service ? (root.service.playing && !root.service.paused) : false
           engaged: root.service ? root.service.playing : false
           art: root.service ? root.service.artPath : ""
-          progress: root.service && root.service.duration > 0
-            ? root.service.position / root.service.duration : 0
+          // The arm reads the whole side, not the track: first song at the outer
+          // groove, last song by the label, creeping inward as each one plays.
+          progress: {
+            if (!root.service || !root.service.playing) return 0
+            var within = root.service.duration > 0 ? root.service.position / root.service.duration : 0
+            var n = root.service.queueCount, i = root.service.queuePos
+            if (n > 0 && i > 0) return Math.max(0, Math.min(1, ((i - 1) + within) / n))
+            return within
+          }
         }
 
         Column {
@@ -401,9 +420,12 @@ PanelWindow {
           && root.service && root.service.browseAll
         readonly property bool inArtists: view === "artists" || searchingNow
 
+        readonly property bool inSettings: view === "settings"
+
         Rectangle {
           id: searchBox
           anchors { top: parent.top; left: parent.left; right: parent.right }
+          visible: !side.inSettings
           height: 34
           radius: 8
           color: root.dim(0.06)
@@ -468,6 +490,11 @@ PanelWindow {
                 break
               case Qt.Key_Escape:
                 root.closeStep(); event.accepted = true; break
+              case Qt.Key_Comma:
+                if (event.modifiers & Qt.ControlModifier) {
+                  root.service.openSettings(); addressField.forceActiveFocus(); event.accepted = true
+                }
+                break
               }
             }
           }
@@ -475,6 +502,7 @@ PanelWindow {
 
         // Which list the keyboard is steering, and what Enter does to its row.
         readonly property var activeList: {
+          if (side.inSettings) return null
           if (side.inArtists) return artistList
           if (side.view === "albums") return albumList
           if (side.view === "tracks") return trackList
@@ -542,6 +570,7 @@ PanelWindow {
           anchors { top: searchBox.bottom; left: parent.left; right: parent.right }
           anchors.topMargin: 12
           height: 24
+          visible: !side.inSettings
 
           Row {
             spacing: 6
@@ -719,9 +748,10 @@ PanelWindow {
               && root.service.trackArtist !== ""
               && root.service.trackArtist.toLowerCase() === itemTitle.toLowerCase()
 
-            color: rowHover.containsMouse ? root.dim(0.08)
+            color: rowHoverH.hovered ? root.dim(0.08)
                  : (isCurrent ? root.acc(0.12) : "transparent")
 
+            HoverHandler { id: rowHoverH }
             MouseArea {
               id: rowHover
               anchors.fill: parent
@@ -753,7 +783,7 @@ PanelWindow {
                 glyph: "󰐊"
                 tip: "Play " + itemTitle
                 strong: true
-                visible: rowHover.containsMouse || isCurrent
+                visible: rowHoverH.hovered || isCurrent
                 onTapped: if (root.service) root.service.playArtist(itemKey)
               }
 
@@ -860,8 +890,9 @@ PanelWindow {
             height: 52
             radius: 8
             readonly property var album: modelData
-            color: albumHover.containsMouse ? root.dim(0.08) : "transparent"
+            color: albumHoverH.hovered ? root.dim(0.08) : "transparent"
 
+            HoverHandler { id: albumHoverH }
             MouseArea {
               id: albumHover
               anchors.fill: parent
@@ -911,7 +942,7 @@ PanelWindow {
               anchors.rightMargin: 6
               anchors.verticalCenter: parent.verticalCenter
               spacing: 2
-              visible: albumHover.containsMouse
+              visible: albumHoverH.hovered
               RowBtn {
                 glyph: "󰐊"; tip: "Play this album"; strong: true
                 onTapped: if (root.service) root.service.playAlbum(album.key, "")
@@ -1038,8 +1069,9 @@ PanelWindow {
               && root.service.trackTitle !== "" && track
               && root.service.trackTitle === track.title
               && (root.service.trackAlbum === track.album || root.service.trackAlbum === "")
-            color: trackHover.containsMouse ? root.dim(0.08) : (isCurrent ? root.acc(0.12) : "transparent")
+            color: trackHoverH.hovered ? root.dim(0.08) : (isCurrent ? root.acc(0.12) : "transparent")
 
+            HoverHandler { id: trackHoverH }
             MouseArea {
               id: trackHover
               anchors.fill: parent
@@ -1087,7 +1119,7 @@ PanelWindow {
               text: track ? root.fmtMs(track.duration) : ""
               font.pixelSize: 10
               color: root.dim(0.4)
-              visible: !trackHover.containsMouse
+              visible: !trackHoverH.hovered
             }
 
             Row {
@@ -1096,11 +1128,11 @@ PanelWindow {
               anchors.rightMargin: 6
               anchors.verticalCenter: parent.verticalCenter
               spacing: 2
-              width: trackHover.containsMouse ? implicitWidth : 0
+              width: trackHoverH.hovered ? implicitWidth : 0
               clip: true
               RowBtn {
                 glyph: "󰐊"; tip: "Play from here"; strong: true
-                visible: trackHover.containsMouse
+                visible: trackHoverH.hovered
                 onTapped: {
                   if (!root.service || !trackList.head) return
                   if (trackList.isPlaylist) root.service.playPlaylist(trackList.head.key, track.key)
@@ -1109,7 +1141,7 @@ PanelWindow {
               }
               RowBtn {
                 glyph: "󰐕"; tip: "Add to a playlist"
-                visible: trackHover.containsMouse
+                visible: trackHoverH.hovered
                 onTapped: if (root.service) root.service.requestAdd([track.key])
               }
             }
@@ -1167,8 +1199,9 @@ PanelWindow {
             height: 48
             radius: 8
             readonly property var pl: modelData
-            color: plHover.containsMouse ? root.dim(0.08) : "transparent"
+            color: plHoverH.hovered ? root.dim(0.08) : "transparent"
 
+            HoverHandler { id: plHoverH }
             MouseArea {
               id: plHover
               anchors.fill: parent
@@ -1215,7 +1248,7 @@ PanelWindow {
               anchors.right: parent.right
               anchors.rightMargin: 6
               anchors.verticalCenter: parent.verticalCenter
-              visible: plHover.containsMouse
+              visible: plHoverH.hovered
               RowBtn {
                 glyph: "󰐊"; tip: "Play this playlist"; strong: true
                 onTapped: if (root.service) root.service.playPlaylist(pl.key, "")
@@ -1229,6 +1262,297 @@ PanelWindow {
             text: "No playlists yet — add a track to start one."
             font.pixelSize: 11
             color: root.dim(0.35)
+          }
+        }
+      }
+    }
+
+    // ---- settings ------------------------------------------------------------
+    //
+    // Everything a stranger needs to get the plugin talking to their own Plex,
+    // with or without a VPN: who is linked, which address to use (the ones
+    // plex.tv reports, plus any they type), and which music library.
+
+    Flickable {
+      id: settingsPane
+      anchors { top: header.bottom; right: parent.right; bottom: meters.top }
+      anchors.margins: 18
+      anchors.topMargin: 18
+      width: body.width - deck.width - 22
+      visible: root.service ? (root.service.linked && root.service.view === "settings") : false
+      contentHeight: settingsCol.implicitHeight
+      clip: true
+      boundsBehavior: Flickable.StopAtBounds
+      ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+      property bool confirmUnlink: false
+      onVisibleChanged: confirmUnlink = false
+
+      Column {
+        id: settingsCol
+        width: settingsPane.width
+        spacing: 18
+
+        // -- account
+        Column {
+          width: parent.width
+          spacing: 8
+          Text { text: "ACCOUNT"; font.pixelSize: 10; font.letterSpacing: 1.6; color: root.dim(0.4) }
+          Row {
+            spacing: 10
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: {
+                var a = root.service ? root.service.account : {}
+                if (!a || !a.username) return "Linked to Plex"
+                return a.valid === false
+                  ? "Linked as " + a.username + " — Plex no longer accepts the token; unlink and link again"
+                  : "Linked as " + a.username
+              }
+              font.pixelSize: 12
+              color: Color.foreground
+            }
+            TextBtn {
+              label: settingsPane.confirmUnlink ? "Really unlink — wipes the token and index" : "Unlink…"
+              accent: settingsPane.confirmUnlink
+              enabled: root.service ? !root.service.settingsBusy : false
+              onTapped: {
+                if (!settingsPane.confirmUnlink) { settingsPane.confirmUnlink = true; return }
+                if (root.service) root.service.unlink()
+              }
+            }
+          }
+        }
+
+        // -- server
+        Column {
+          width: parent.width
+          spacing: 8
+          Text { text: "SERVER"; font.pixelSize: 10; font.letterSpacing: 1.6; color: root.dim(0.4) }
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "Addresses plex.tv reports for your account, local ones first, Plex's relay last. "
+                  + "Click one to use it. If your server is somewhere Plex cannot see — a VPN such as "
+                  + "Tailscale, a reverse proxy, a LAN name — add the address yourself; typed addresses "
+                  + "are tried before anything else."
+            font.pixelSize: 11
+            color: root.dim(0.55)
+          }
+
+          Repeater {
+            model: root.service ? root.service.servers : []
+            delegate: Rectangle {
+              width: settingsCol.width
+              height: 36
+              radius: 7
+              readonly property var srv: modelData
+              readonly property bool active: root.service && srv && root.service.server === srv.uri
+              // Dead addresses stay listed (they are what plex.tv claims) but
+              // recede, so the ones that answer are what the eye lands on.
+              opacity: (srv && srv.reachable) || active ? 1 : 0.5
+              color: active ? root.acc(0.12) : (srvH.hovered ? root.dim(0.08) : "transparent")
+              border.width: active ? 1 : 0
+              border.color: root.acc(0.5)
+              HoverHandler { id: srvH }
+              MouseArea {
+                anchors.fill: parent
+                enabled: root.service ? !root.service.settingsBusy : false
+                onClicked: if (root.service && srv) root.service.useServer(srv.uri)
+              }
+              Rectangle {
+                id: dot
+                anchors.left: parent.left
+                anchors.leftMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                width: 8; height: 8; radius: 4
+                color: srv && srv.reachable ? Color.accent : Color.urgent
+                opacity: srv && srv.reachable ? 1 : 0.7
+              }
+              Text {
+                anchors.left: dot.right
+                anchors.leftMargin: 10
+                anchors.right: srvMeta.left
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideMiddle
+                text: (srv && srv.uri) ? String(srv.uri) : ""
+                font.pixelSize: 12
+                color: active ? Color.accent : Color.foreground
+              }
+              Row {
+                id: srvMeta
+                anchors.right: parent.right
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 10
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: {
+                    if (!srv) return ""
+                    var bits = []
+                    if (srv.source === "manual") bits.push("yours")
+                    else if (srv.relay) bits.push("relay")
+                    else if (srv.local) bits.push("local")
+                    else bits.push("remote")
+                    if (srv.ms !== null && srv.ms !== undefined) bits.push(srv.ms + " ms")
+                    else bits.push("no answer")
+                    if (active) bits.push("in use")
+                    return bits.join("  ·  ")
+                  }
+                  font.pixelSize: 10
+                  color: root.dim(0.45)
+                }
+                RowBtn {
+                  glyph: "󰅖"
+                  tip: "Forget this address"
+                  visible: srv && srv.source === "manual"
+                  onTapped: if (root.service && srv) root.service.removeServer(srv.uri)
+                }
+              }
+            }
+          }
+
+          Text {
+            visible: root.service && root.service.loadingServers && root.service.servers.length === 0
+            text: "Looking for servers…"
+            font.pixelSize: 11
+            color: root.dim(0.4)
+          }
+
+          Item {
+            width: parent.width
+            height: 36
+            Rectangle {
+              anchors { left: parent.left; right: addBtn.left; top: parent.top; bottom: parent.bottom }
+              anchors.rightMargin: 8
+              radius: 8
+              color: root.dim(0.06)
+              border.width: 1
+              border.color: addressField.activeFocus ? root.acc(0.7) : root.dim(0.12)
+              TextField {
+                id: addressField
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 6
+                verticalAlignment: TextInput.AlignVCenter
+                placeholderText: "http://plex.local:32400   or   http://10.0.0.5:32400   or   https://plex.example.com"
+                font.pixelSize: 12
+                color: Color.foreground
+                placeholderTextColor: root.dim(0.3)
+                background: Item {}
+                Keys.onReturnPressed: if (root.service && text.trim() !== "") { root.service.useServer(text.trim()); text = "" }
+                Keys.onEscapePressed: root.closeStep()
+              }
+            }
+            TextBtn {
+              id: addBtn
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              label: "Add and use"
+              accent: true
+              enabled: addressField.text.trim() !== "" && root.service && !root.service.settingsBusy
+              onTapped: if (root.service) { root.service.useServer(addressField.text.trim()); addressField.text = "" }
+            }
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            visible: root.service && root.service.settingsNote !== ""
+            text: root.service ? root.service.settingsNote : ""
+            font.pixelSize: 11
+            color: Color.accent
+          }
+        }
+
+        // -- library
+        Column {
+          width: parent.width
+          spacing: 8
+          visible: root.service && root.service.sections.length > 1
+          Text { text: "MUSIC LIBRARY"; font.pixelSize: 10; font.letterSpacing: 1.6; color: root.dim(0.4) }
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "This server has more than one music library. Pick the one to browse; the index is rebuilt when you switch."
+            font.pixelSize: 11
+            color: root.dim(0.55)
+          }
+          Repeater {
+            model: root.service ? root.service.sections : []
+            delegate: Rectangle {
+              width: settingsCol.width
+              height: 32
+              radius: 7
+              readonly property var sec: modelData
+              color: sec && sec.active ? root.acc(0.12) : (secH.hovered ? root.dim(0.08) : "transparent")
+              border.width: sec && sec.active ? 1 : 0
+              border.color: root.acc(0.5)
+              HoverHandler { id: secH }
+              MouseArea {
+                anchors.fill: parent
+                enabled: root.service ? !root.service.settingsBusy : false
+                onClicked: if (root.service && sec && !sec.active) root.service.useSection(sec.key)
+              }
+              Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                text: sec ? sec.title : ""
+                font.pixelSize: 12
+                color: sec && sec.active ? Color.accent : Color.foreground
+              }
+              Text {
+                anchors.right: parent.right
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                visible: sec && sec.active
+                text: "in use"
+                font.pixelSize: 10
+                color: root.dim(0.45)
+              }
+            }
+          }
+        }
+
+        // -- index
+        Column {
+          width: parent.width
+          spacing: 8
+          Text { text: "INDEX"; font.pixelSize: 10; font.letterSpacing: 1.6; color: root.dim(0.4) }
+          Row {
+            spacing: 10
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.service
+                ? (root.service.indexing ? "Indexing…"
+                   : root.service.artistCount + " artists indexed. Rescan after adding music to Plex.")
+                : ""
+              font.pixelSize: 12
+              color: Color.foreground
+            }
+            TextBtn {
+              label: "Rescan"
+              enabled: root.service ? !root.service.indexing : false
+              onTapped: if (root.service) root.service.reindex()
+            }
+          }
+        }
+
+        // -- shortcuts
+        Column {
+          width: parent.width
+          spacing: 8
+          Text { text: "KEYBOARD"; font.pixelSize: 10; font.letterSpacing: 1.6; color: root.dim(0.4) }
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "Type to search  ·  ↑ ↓ move  ·  Enter open  ·  Ctrl+Enter play  ·  ← back  ·  "
+                  + "Ctrl+P add to playlist  ·  Ctrl+, settings  ·  Esc back / close. "
+                  + "Middle-click the bar widget to pause."
+            font.pixelSize: 11
+            color: root.dim(0.55)
           }
         }
       }
@@ -1358,7 +1682,8 @@ PanelWindow {
             width: addList.width
             height: 36
             radius: 7
-            color: addHover.containsMouse ? root.acc(0.14) : "transparent"
+            color: addHoverH.hovered ? root.acc(0.14) : "transparent"
+            HoverHandler { id: addHoverH }
             MouseArea {
               id: addHover
               anchors.fill: parent

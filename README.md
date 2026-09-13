@@ -74,6 +74,25 @@ To disable it but keep the files:
 omarchy plugin disable io.github.mfilm77.plexmusic
 ```
 
+## Settings
+
+The gear in the panel header (or **Ctrl+,**) opens Settings:
+
+- **Account** — who is linked, and *Unlink* (two clicks; wipes the token and
+  the local index).
+- **Server** — every address plex.tv reports for your account, probed live
+  with round-trip times, the one in use marked. Click another to switch. Type
+  your own to add and use it — a LAN name, a reverse proxy, or a VPN address
+  such as Tailscale's. Typed addresses are tried before anything else and can be
+  forgotten again with the ×.
+- **Music library** — shown when the server has more than one; switching
+  rebuilds the index.
+- **Index** — artist count and a Rescan button.
+
+No VPN is needed. If your server is on the same network the local address is
+found; away from home, Plex's Remote Access address is used if you have it
+enabled, and Plex's relay is the last resort.
+
 ## How it finds your server
 
 In this order:

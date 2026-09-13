@@ -68,6 +68,14 @@ Item {
   property bool addBusy: false
   property string toast: ""
 
+  // ---- settings -----------------------------------------------------------
+  property var servers: []            // from `server`: uri, source, reachable, ms
+  property bool loadingServers: false
+  property var account: ({})          // {username, valid}
+  property var sections: []           // music libraries on the server
+  property bool settingsBusy: false
+  property string settingsNote: ""
+
   // ---- playback -----------------------------------------------------------
   property bool playing: false
   property bool paused: false
@@ -536,6 +544,145 @@ Item {
     playlistWriteProc.command = [root.helper, "playlists", "create",
                                  "--title", t, "--tracks", root.pendingAdd.join(",")]
     playlistWriteProc.running = true
+  }
+
+  // ---- settings -----------------------------------------------------------
+
+  Process {
+    id: serversProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.loadingServers = false
+        root.settingsBusy = false
+        var d = root.parse(text)
+        if (d && d.servers) {
+          root.servers = d.servers
+          if (d.active !== undefined) root.server = d.active || ""
+          if (d.added !== undefined)
+            root.settingsNote = d.reachable
+              ? "Using " + d.added + " (" + d.ms + " ms)"
+              : d.added + " did not answer — kept in the list, not in use"
+        } else if (d && d.error) {
+          root.settingsNote = d.error
+        }
+        root.refreshStatus()
+      }
+    }
+  }
+
+  Process {
+    id: serverWriteProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.settingsBusy = false
+        var d = root.parse(text)
+        if (d && d.added !== undefined) {
+          root.settingsNote = d.reachable
+            ? "Using " + d.added + " (" + d.ms + " ms)"
+            : d.added + " did not answer — kept in the list, not in use"
+          if (d.active !== undefined) root.server = d.active || ""
+        } else if (d && d.error) {
+          root.settingsNote = d.error
+        }
+        root.refreshServers()
+        root.refreshStatus()
+      }
+    }
+  }
+
+  Process {
+    id: accountProc
+    command: [root.helper, "account"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var d = root.parse(text)
+        if (d) root.account = d
+      }
+    }
+  }
+
+  Process {
+    id: sectionsProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.settingsBusy = false
+        var d = root.parse(text)
+        if (d && d.sections) root.sections = d.sections
+        if (d && d.error) root.settingsNote = d.error
+      }
+    }
+  }
+
+  Process {
+    id: forgetProc
+    command: [root.helper, "link", "forget"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.settingsBusy = false
+        root.linked = false
+        root.server = ""
+        root.artists = []
+        root.letterIndex = ({})
+        root.favourites = []
+        root.servers = []
+        root.sections = []
+        root.account = ({})
+        root.view = "artists"
+        root.control("stop")
+        root.refreshStatus()
+      }
+    }
+  }
+
+  function openSettings() {
+    root.view = "settings"
+    root.settingsNote = ""
+    root.refreshServers()
+    root.refreshAccount()
+    root.refreshSections()
+  }
+
+  function refreshServers() {
+    root.loadingServers = true
+    serversProc.command = [root.helper, "server"]
+    serversProc.running = true
+  }
+
+  // Adds (if new) and pins an address the user typed or picked.
+  function useServer(uri) {
+    if (!uri) return
+    root.settingsBusy = true
+    root.settingsNote = "Checking " + uri + "…"
+    serverWriteProc.command = [root.helper, "server", "--use", String(uri)]
+    serverWriteProc.running = true
+  }
+
+  function removeServer(uri) {
+    if (!uri) return
+    root.settingsBusy = true
+    serverWriteProc.command = [root.helper, "server", "--remove", String(uri)]
+    serverWriteProc.running = true
+  }
+
+  function refreshAccount() { accountProc.running = true }
+
+  function refreshSections() {
+    sectionsProc.command = [root.helper, "sections"]
+    sectionsProc.running = true
+  }
+
+  function useSection(key) {
+    if (!key) return
+    root.settingsBusy = true
+    sectionsProc.command = [root.helper, "sections", "--use", String(key)]
+    sectionsProc.running = true
+    // The old index is gone; build the new one straight away.
+    Qt.callLater(function () { root.reindex() })
+  }
+
+  function unlink() {
+    root.settingsBusy = true
+    forgetProc.running = true
   }
 
   function showToast(message) {
