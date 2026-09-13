@@ -52,8 +52,8 @@ PanelWindow {
   function closeStep() {
     if (!service) { dismiss(); return }
     if (service.addOpen) { service.addOpen = false; return }
-    if (searchField.text !== "") { searchField.text = ""; return }
     if (service.view === "settings") { service.view = "artists"; searchField.forceActiveFocus(); return }
+    if (searchField.text !== "") { searchField.text = ""; return }
     if (service.view !== "artists" && service.view !== "playlists") { service.back(); return }
     dismiss()
   }
