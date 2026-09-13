@@ -23,12 +23,13 @@ Item {
 
   Item {
     id: platter
-    // The platter takes the left 84% of the item; the arm's bearing sits in
-    // the strip to its right, as it does on a deck.
-    width: root.size * 0.84
+    // The platter takes the lower-left 78% of the item. The strip above and
+    // to the right is where the arm's bearing sits — back-right of the
+    // platter, as on a deck seen from above.
+    width: root.size * 0.78
     height: width
     x: 0
-    anchors.verticalCenter: parent.verticalCenter
+    y: root.size * 0.22
 
     // Everything that must turn with the record lives in here.
     Item {
@@ -234,17 +235,20 @@ Item {
   property real progress: 0
   property bool engaged: false
 
-  // Pivot and length, in platter units, solved so the stylus arc crosses the
-  // outermost groove in the upper right of the record and reaches the label
-  // edge 28 degrees later — the diagonal sweep of a real arm seen from above.
-  // At the outer groove the arm points up-left (+25.8 deg in Qt's clockwise
-  // rotation); at the label it lies almost flat (-2.3 deg).
-  readonly property real pivotX: platter.x + platter.width * 1.16
-  readonly property real pivotY: platter.y + platter.height * 0.30
-  readonly property real armLen: platter.width * 0.55       // pivot to stylus
-  readonly property real cwLen: platter.width * 0.12        // pivot to counterweight end
-  readonly property real angleOn: 25.8 - Math.max(0, Math.min(1, root.progress)) * 28.1
-  readonly property real angleRest: -80                     // parked on the rest, off the disc
+  // Pivot and length in platter units, solved for a real deck's path: the
+  // pivot is behind and to the right of the platter, the arm reaches forward
+  // and left, the stylus lands at the record's right side (about three
+  // o'clock, r = 0.47) for the first track and arcs in to the label edge
+  // (r = 0.21) for the last. In Qt's clockwise rotation about the pivot that
+  // is -96.3 degrees at the outer groove and -68.9 at the label. The rest is
+  // four degrees further out, just off the edge, so cueing is a lift and a
+  // short move inward — never a sweep across the label.
+  readonly property real pivotX: platter.x + platter.width * 0.895
+  readonly property real pivotY: platter.y - platter.height * 0.198
+  readonly property real armLen: platter.width * 0.62       // pivot to stylus
+  readonly property real cwLen: platter.width * 0.09        // pivot to counterweight end
+  readonly property real angleOn: -(96.3 - Math.max(0, Math.min(1, root.progress)) * 27.4)
+  readonly property real angleRest: -100
 
   readonly property color metal: Qt.rgba(
     Color.foreground.r * 0.85 + 0.10, Color.foreground.g * 0.85 + 0.10,
@@ -254,8 +258,10 @@ Item {
 
   // The arm rest: a small post with a clip, where the headshell parks.
   Item {
-    x: root.pivotX - root.armLen * Math.cos(80 * Math.PI / 180) - width / 2
-    y: root.pivotY + root.armLen * Math.sin(80 * Math.PI / 180) - height * 0.55
+    // Where the stylus is at angleRest (t = 100 degrees from the arm's
+    // leftward axis): just off the record's right edge.
+    x: root.pivotX - root.armLen * Math.cos(100 * Math.PI / 180) - width / 2
+    y: root.pivotY + root.armLen * Math.sin(100 * Math.PI / 180) - height * 0.5
     width: root.size * 0.048
     height: root.size * 0.05
     z: 1

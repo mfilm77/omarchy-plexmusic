@@ -182,7 +182,13 @@ changing the replaygain mode.
   `~/.cache/omarchy-plex-music/art`. The cache key includes Plex's artwork
   version, so replacing a cover in Plex does not leave a stale one here.
 - **The record** turns at 33⅓ rpm — 1.8 s a revolution. Pausing stops it where
-  it is.
+  it is. The tonearm's pivot and length are solved so the stylus lands on the
+  outermost groove for the first track of what is playing and reaches the
+  label for the last, creeping inward per song; its rest sits just off the edge
+  by the lead-in, so cueing is a lift and a few degrees, never a sweep across
+  the record.
+- **Timeline** — click or drag to seek. **Volume** is a small console fader at
+  the deck's right edge (drag, or scroll over it).
 - **The meters** are `cava` in raw mode, read a frame at a time. cava taps the
   default output's monitor, so the band follows whatever the machine is playing
   and keeps working when you switch to headphones. It only runs while the panel

@@ -306,6 +306,8 @@ PanelWindow {
 
         Column {
           anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+          // Leave the fader its own column at the right edge.
+          anchors.rightMargin: 36
           spacing: 8
 
           Text {
@@ -340,7 +342,9 @@ PanelWindow {
               id: elapsed
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
-              text: root.fmt(root.service ? root.service.position : 0)
+              text: root.fmt(timeline.scrubbing && root.service
+                ? timeline.scrubFrac * root.service.duration
+                : (root.service ? root.service.position : 0))
               font.pixelSize: 10
               color: root.dim(0.45)
             }
@@ -354,22 +358,66 @@ PanelWindow {
               color: root.dim(0.45)
             }
 
-            Rectangle {
+            // The timeline. Click or drag anywhere on it to seek; while the
+            // hand is down the bar follows the hand, not the player.
+            Item {
+              id: timeline
               anchors.verticalCenter: parent.verticalCenter
               anchors.left: elapsed.right
               anchors.right: total.left
               anchors.leftMargin: 8
               anchors.rightMargin: 8
-              height: 3
-              radius: 1.5
-              color: root.dim(0.15)
+              height: 14
+              property bool scrubbing: false
+              property real scrubFrac: 0
+              readonly property real frac: scrubbing ? scrubFrac
+                : (root.service && root.service.duration > 0
+                   ? Math.min(1, root.service.position / root.service.duration) : 0)
 
               Rectangle {
-                height: parent.height
-                radius: parent.radius
-                color: Color.accent
-                width: parent.width * (root.service && root.service.duration > 0
-                  ? Math.min(1, root.service.position / root.service.duration) : 0)
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width
+                height: tlHover.hovered || timeline.scrubbing ? 5 : 3
+                radius: height / 2
+                color: root.dim(0.15)
+                Behavior on height { NumberAnimation { duration: 80 } }
+                Rectangle {
+                  height: parent.height
+                  radius: parent.radius
+                  color: Color.accent
+                  width: parent.width * timeline.frac
+                }
+              }
+              // The knob only appears when the pointer is near, or while scrubbing.
+              Rectangle {
+                x: timeline.width * timeline.frac - width / 2
+                anchors.verticalCenter: parent.verticalCenter
+                width: 11; height: 11; radius: 5.5
+                color: Color.foreground
+                border.width: 2
+                border.color: Color.accent
+                visible: tlHover.hovered || timeline.scrubbing
+                antialiasing: true
+              }
+              HoverHandler { id: tlHover }
+              MouseArea {
+                anchors.fill: parent
+                anchors.topMargin: -6
+                anchors.bottomMargin: -6
+                onPressed: function (m) {
+                  timeline.scrubbing = true
+                  timeline.scrubFrac = Math.max(0, Math.min(1, m.x / timeline.width))
+                }
+                onPositionChanged: function (m) {
+                  if (timeline.scrubbing)
+                    timeline.scrubFrac = Math.max(0, Math.min(1, m.x / timeline.width))
+                }
+                onReleased: function (m) {
+                  if (root.service && root.service.duration > 0)
+                    root.service.seek(timeline.scrubFrac * root.service.duration)
+                  timeline.scrubbing = false
+                }
+                onCanceled: timeline.scrubbing = false
               }
             }
           }
@@ -409,6 +457,18 @@ PanelWindow {
             color: root.dim(0.35)
           }
         }
+      }
+
+      // A console fader for volume, small, at the deck's right edge.
+      Fader {
+        anchors.right: deck.right
+        anchors.rightMargin: 4
+        anchors.bottom: deck.bottom
+        anchors.bottomMargin: 2
+        value: root.service ? root.service.volume : 100
+        enabled: root.service ? root.service.playing : false
+        onMoved: function (v) { if (root.service) root.service.setVolume(v) }
+        onDraggingChanged: if (root.service) root.service.volumeDragging = dragging
       }
 
       // ---- right: the browser -----------------------------------------------
@@ -1786,6 +1846,119 @@ PanelWindow {
   }
 
   // ---- small shared bits ---------------------------------------------------
+
+  // A mixing-desk fader: a recessed slot, a brushed-metal cap with an index
+  // line riding it, scale ticks, and the lit run below the cap. Small — it is
+  // a volume control, not a feature.
+  component Fader: Item {
+    id: fader
+    property real value: 100          // 0-100
+    property bool dragging: false
+    signal moved(real v)
+
+    width: 30
+    height: 112
+    opacity: enabled ? 1 : 0.45
+
+    readonly property real capH: 14
+    readonly property real padTop: 6
+    readonly property real travel: height - 30
+    readonly property real frac: Math.max(0, Math.min(100, value)) / 100
+    readonly property real capY: top + travel * (1 - frac)
+    readonly property color metal: Qt.rgba(Color.foreground.r * 0.85 + 0.10,
+                                           Color.foreground.g * 0.85 + 0.10,
+                                           Color.foreground.b * 0.85 + 0.10, 1)
+
+    // Scale: ticks at every 10, longer at 0/50/100, "dB"-style.
+    Repeater {
+      model: 11
+      Rectangle {
+        x: fader.width / 2 + 8
+        y: fader.padTop + fader.capH / 2 + fader.travel * (index / 10) - 0.5
+        width: index % 5 === 0 ? 6 : 3
+        height: 1
+        color: root.dim(index % 5 === 0 ? 0.45 : 0.22)
+      }
+    }
+
+    // The slot: recessed, with the lit run from the bottom up to the cap.
+    Rectangle {
+      id: slot
+      anchors.horizontalCenter: parent.horizontalCenter
+      y: fader.padTop + fader.capH / 2
+      width: 5
+      height: fader.travel
+      radius: 2.5
+      color: Qt.rgba(0, 0, 0, 0.55)
+      border.width: 1
+      border.color: root.dim(0.14)
+      Rectangle {
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 1
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: 2
+        height: Math.max(0, (parent.height - 2) * fader.frac)
+        radius: 1
+        color: Color.accent
+        opacity: 0.85
+      }
+    }
+
+    // Cap shadow.
+    Rectangle {
+      anchors.horizontalCenter: parent.horizontalCenter
+      y: fader.capY + 2
+      width: 20; height: fader.capH; radius: 3
+      color: Qt.rgba(0, 0, 0, 0.45)
+    }
+    // The cap.
+    Rectangle {
+      id: cap
+      anchors.horizontalCenter: parent.horizontalCenter
+      y: fader.capY
+      width: 20
+      height: fader.capH
+      radius: 3
+      antialiasing: true
+      gradient: Gradient {
+        GradientStop { position: 0.0; color: Qt.lighter(fader.metal, 1.25) }
+        GradientStop { position: 0.5; color: fader.metal }
+        GradientStop { position: 1.0; color: Qt.darker(fader.metal, 1.9) }
+      }
+      border.width: 1
+      border.color: fader.dragging || fHover.hovered ? Color.accent : Qt.rgba(0, 0, 0, 0.7)
+      // Grip lines either side of the accent index.
+      Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: -3; width: parent.width - 6; height: 1; color: Qt.rgba(0, 0, 0, 0.35) }
+      Rectangle { anchors.centerIn: parent; width: parent.width - 4; height: 2; color: Color.accent }
+      Rectangle { anchors.centerIn: parent; anchors.verticalCenterOffset: 3; width: parent.width - 6; height: 1; color: Qt.rgba(0, 0, 0, 0.35) }
+    }
+
+    Text {
+      anchors.horizontalCenter: parent.horizontalCenter
+      anchors.bottom: parent.bottom
+      text: fader.dragging || fHover.hovered ? Math.round(fader.value) : "VOL"
+      font.pixelSize: 8
+      font.letterSpacing: 1
+      color: fader.dragging ? Color.accent : root.dim(0.45)
+    }
+
+    HoverHandler { id: fHover }
+    MouseArea {
+      anchors.fill: parent
+      anchors.leftMargin: -6
+      anchors.rightMargin: -6
+      enabled: fader.enabled
+      function apply(y) {
+        var v = 100 * (1 - (y - fader.padTop - fader.capH / 2) / fader.travel)
+        fader.moved(Math.max(0, Math.min(100, v)))
+      }
+      onPressed: function (m) { fader.dragging = true; apply(m.y) }
+      onPositionChanged: function (m) { if (fader.dragging) apply(m.y) }
+      onReleased: fader.dragging = false
+      onCanceled: fader.dragging = false
+      onWheel: function (w) { fader.moved(Math.max(0, Math.min(100, fader.value + (w.angleDelta.y > 0 ? 3 : -3)))) }
+    }
+  }
 
   component IconToggle: Rectangle {
     id: toggle

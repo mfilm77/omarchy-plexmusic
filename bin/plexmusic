@@ -970,6 +970,10 @@ def cmd_cmd(args) -> None:
         if args.value is None:
             die("volume needs --value 0-130")
         mpv_request(["set_property", "volume", float(args.value)])
+    elif action == "seek":
+        if args.value is None:
+            die("seek needs --value SECONDS (absolute)")
+        mpv_request(["seek", float(args.value), "absolute"])
     else:
         die(f"unknown command: {action}")
     emit({"action": action})
@@ -1107,7 +1111,7 @@ def main() -> None:
 
     p = sub.add_parser("cmd")
     p.add_argument("action", choices=["play-pause", "play", "pause", "next",
-                                      "prev", "stop", "volume"])
+                                      "prev", "stop", "volume", "seek"])
     p.add_argument("--value", type=float)
     p.set_defaults(func=cmd_cmd)
 

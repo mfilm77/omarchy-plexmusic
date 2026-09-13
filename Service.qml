@@ -88,6 +88,7 @@ Item {
   property int queuePos: 0
   property int queueCount: 0
   property bool shuffle: true
+  property real volume: 100
 
   // ---- spectrum -----------------------------------------------------------
   // One frame of cava's raw output: 64 values, each 0-100.
@@ -217,6 +218,7 @@ Item {
         root.duration = d.duration || 0
         root.queuePos = (d.playlistPos || 0) + 1
         root.queueCount = d.playlistCount || 0
+        if (typeof d.volume === "number" && !root.volumeDragging) root.volume = d.volume
       }
     }
   }
@@ -320,10 +322,25 @@ Item {
     cmdProc.running = true
   }
 
+  // While the fader is being dragged the poll must not fight the hand.
+  property bool volumeDragging: false
+
   function setVolume(value) {
-    cmdProc.command = [root.helper, "cmd", "volume", "--value", String(value)]
+    var v = Math.max(0, Math.min(100, Math.round(value)))
+    root.volume = v
+    volProc.command = [root.helper, "cmd", "volume", "--value", String(v)]
+    volProc.running = true
+  }
+
+  function seek(seconds) {
+    if (!root.playing) return
+    root.position = Math.max(0, Math.min(root.duration, seconds))
+    cmdProc.command = [root.helper, "cmd", "seek", "--value", String(root.position)]
     cmdProc.running = true
   }
+
+  // Its own process so a run of fader moves never cancels a transport command.
+  Process { id: volProc }
 
   function isFavourite(key) {
     var k = String(key)
