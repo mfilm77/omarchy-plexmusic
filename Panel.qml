@@ -34,6 +34,8 @@ PanelWindow {
       if (service.view === "playlists") service.refreshPlaylists()
     }
     searchField.forceActiveFocus()
+    // Come back to where you were, with the playing song in view.
+    Qt.callLater(function () { side.revealCurrent() })
   }
 
   function close() {
@@ -288,9 +290,13 @@ PanelWindow {
         Vinyl {
           id: vinyl
           anchors.horizontalCenter: parent.horizontalCenter
+          // The platter fills the left 80% of the turntable box (the arm has
+          // the rest), so the box is shifted right by that difference to put
+          // the label's centre under the centred title.
+          anchors.horizontalCenterOffset: width * 0.10
           anchors.top: parent.top
           // Leave the title block real room under the record.
-          width: Math.max(0, Math.min(parent.width, parent.height - 165))
+          width: Math.max(0, Math.min(parent.width - 20, parent.height - 185))
           height: width
           spinning: root.service ? (root.service.playing && !root.service.paused) : false
           // Paused or stopped, the arm goes back to its rest, off the record.
@@ -311,7 +317,7 @@ PanelWindow {
         // The volume fader stands beside the arm, above the timeline.
         Fader {
           anchors.right: parent.right
-          anchors.rightMargin: 2
+          anchors.rightMargin: -12
           // Top stays level with the arm rest; the extra length runs downward.
           anchors.bottom: vinyl.bottom
           anchors.bottomMargin: -50
@@ -584,6 +590,22 @@ PanelWindow {
           if (!root.service || !item) return
           if (searchField.text !== "") searchField.text = ""
           root.service.openArtist(item)
+        }
+        // Scroll whichever list is showing to the song that is playing and
+        // put the keyboard highlight on it.
+        function revealCurrent() {
+          if (!root.service || !root.service.playing || !root.service.trackKey) return
+          var key = root.service.trackKey
+          var list = side.activeList
+          if (!list || !list.model) return
+          var m = list.model
+          for (var i = 0; i < m.length; i++) {
+            if (m[i] && String(m[i].key) === key) {
+              list.currentIndex = i
+              list.positionViewAtIndex(i, ListView.Center)
+              return
+            }
+          }
         }
         function currentItem() {
           var list = side.activeList
@@ -1291,10 +1313,9 @@ PanelWindow {
             height: 32
             radius: 6
             readonly property var track: modelData
-            readonly property bool isCurrent: root.service && root.service.playing
-              && root.service.trackTitle !== "" && track
-              && root.service.trackTitle === track.title
-              && (root.service.trackAlbum === track.album || root.service.trackAlbum === "")
+            readonly property bool isCurrent: root.service && root.service.playing && track
+              && (root.service.trackKey ? String(track.key) === root.service.trackKey
+                  : (root.service.trackTitle === track.title))
             color: trackHoverH.hovered ? root.dim(0.08) : (isCurrent ? root.acc(0.12) : "transparent")
 
             HoverHandler { id: trackHoverH }
@@ -2164,7 +2185,8 @@ PanelWindow {
     property var track: null
     radius: 7
     readonly property bool isCurrent: root.service && root.service.playing && track
-      && root.service.trackTitle === track.title && root.service.trackArtist === track.artist
+      && (root.service.trackKey ? String(track.key) === root.service.trackKey
+          : (root.service.trackTitle === track.title && root.service.trackArtist === track.artist))
     color: tH.hovered ? root.dim(0.08) : (isCurrent ? root.acc(0.12) : "transparent")
     HoverHandler { id: tH }
     MouseArea {

@@ -1079,6 +1079,8 @@ def cmd_now(args) -> None:
         "playlistPos": pos,
         "playlistCount": mpv_get("playlist-count") or 0,
         "shuffle": bool(queue.get("shuffle")),
+        "key": entry.get("key") or "",
+        "albumKey": entry.get("albumKey") or "",
     })
 
 

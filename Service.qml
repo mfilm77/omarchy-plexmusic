@@ -92,6 +92,8 @@ Item {
   property string trackArtist: ""
   property string trackAlbum: ""
   property string artPath: ""
+  property string trackKey: ""           // Plex key of the playing track
+  property string trackAlbumKey: ""
   property real position: 0
   property real duration: 0
   property int queuePos: 0
@@ -257,6 +259,7 @@ Item {
         if (!d) return
         root.playing = !!d.playing
         if (!d.playing) {
+          root.trackKey = ""; root.trackAlbumKey = ""
           root.trackTitle = ""; root.trackArtist = ""; root.trackAlbum = ""
           root.artPath = ""; root.position = 0; root.duration = 0
           root.queuePos = 0; root.queueCount = 0
@@ -267,6 +270,8 @@ Item {
         root.trackArtist = d.artist || ""
         root.trackAlbum = d.album || ""
         root.artPath = d.art || ""
+        root.trackKey = d.key ? String(d.key) : ""
+        root.trackAlbumKey = d.albumKey ? String(d.albumKey) : ""
         root.position = d.position || 0
         root.duration = d.duration || 0
         root.queuePos = (d.playlistPos || 0) + 1
