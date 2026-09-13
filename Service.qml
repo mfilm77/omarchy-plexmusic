@@ -96,6 +96,7 @@ Item {
   property real duration: 0
   property int queuePos: 0
   property int queueCount: 0
+  property bool queueShuffled: false     // whether what is playing was started shuffled
   property bool shuffle: true
   property real volume: 100
 
@@ -270,6 +271,7 @@ Item {
         root.duration = d.duration || 0
         root.queuePos = (d.playlistPos || 0) + 1
         root.queueCount = d.playlistCount || 0
+        root.queueShuffled = !!d.shuffle
         // Only trust mpv's volume once nothing of ours is still in flight.
         if (typeof d.volume === "number" && !root.volumeDragging
             && root.pendingVolume < 0 && !volProc.running) root.volume = d.volume

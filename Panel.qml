@@ -466,7 +466,7 @@ PanelWindow {
             visible: root.service && root.service.playing && root.service.queueCount > 0
             text: root.service
               ? root.service.queuePos + " of " + root.service.queueCount
-                + (root.service.shuffle ? "  ·  shuffled" : "")
+                + (root.service.queueShuffled ? "  ·  shuffled" : "")
               : ""
             font.pixelSize: 10
             color: root.dim(0.35)
@@ -910,7 +910,7 @@ PanelWindow {
           id: searchList
           anchors { top: nav.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
           anchors.topMargin: 8
-          visible: side.searchingNow
+          visible: side.searchingNow && !side.inSettings
           clip: true
           spacing: 2
           boundsBehavior: Flickable.StopAtBounds
