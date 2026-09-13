@@ -329,6 +329,7 @@ PanelWindow {
 
         Column {
           anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+          anchors.bottomMargin: 14
           spacing: 8
 
           Text {
@@ -520,7 +521,7 @@ PanelWindow {
             anchors.leftMargin: 32
             anchors.rightMargin: 10
             verticalAlignment: TextInput.AlignVCenter
-            placeholderText: "Search artists…"
+            placeholderText: "Search artists or titles…"
             font.pixelSize: 12
             color: Color.foreground
             placeholderTextColor: root.dim(0.35)
