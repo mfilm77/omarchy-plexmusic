@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Effects
+import QtQuick.Shapes
 import qs.Commons
 
 // A record on a platter: black disc, cut grooves, the album cover as the label.
@@ -18,6 +19,20 @@ Item {
   // every radius below depends on this.
   readonly property real size: Math.max(0, Math.min(width, height))
   readonly property real labelSize: size * labelRatio
+
+  component ArmPath: ShapePath {
+    capStyle: ShapePath.RoundCap
+    joinStyle: ShapePath.RoundJoin
+    fillColor: "transparent"
+    property real dy: 0
+    startX: arm.pivotLocalX + root.size * 0.02; startY: arm.height / 2 + dy
+    PathLine { x: arm.pivotLocalX - arm.width * 0.34; y: arm.height / 2 + dy }
+    PathCubic {
+      x: arm.tubeStart; y: arm.height / 2 + arm.sOff + dy
+      control1X: arm.pivotLocalX - arm.width * 0.62; control1Y: arm.height / 2 + dy
+      control2X: arm.tubeStart + arm.width * 0.18; control2Y: arm.height / 2 + arm.sOff * 1.9 + dy
+    }
+    }
 
   // ---- the disc ------------------------------------------------------------
 
@@ -297,13 +312,24 @@ Item {
   // lower-right (r = 0.47 at t = 70.6 deg) and arcs in to the label (r = 0.21
   // at 52 deg); the rest is just off the lower-right edge at 80 deg, the arm
   // parked nearly vertical along the platter's right side.
-  readonly property real pivotX: platter.x + platter.width * 1.12
-  readonly property real pivotY: platter.y - platter.height * 0.05
-  readonly property real armLen: platter.width * 0.965      // pivot to stylus
-  readonly property real cwLen: platter.width * 0.07        // pivot to counterweight end
-  readonly property real angleOn: -(70.6 - Math.max(0, Math.min(1, root.progress)) * 18.6)
-  // Parked off the record's lower-right edge, r = 0.60.
-  readonly property real angleRest: -80
+  // Measured off a top-down photograph of a real deck (platter width = 1):
+  // bearing at (1.065, 0.15), needle 0.71 from it. Playing, the needle drops
+  // at the record's lower-right (r = 0.47 at 72 deg) and arcs in to the label
+  // (r = 0.21 at 48.5 deg). At rest the arm hangs straight down at 90 deg,
+  // its tube at x = 1.065 — wholly outside the record, with a visible gap.
+  // Measured off top-down photographs of real decks (platter width = 1):
+  // bearing at (1.115, 0.12), needle 0.74 from it. Playing, the needle drops
+  // at the record's lower-right (r = 0.47 at 70.5 deg) and arcs in to the
+  // label (r = 0.21 at 48 deg). At rest the arm hangs almost straight down at
+  // 85 deg with its tube wholly outside the record — a clear margin, as in
+  // every photo.
+  readonly property real pivotX: platter.x + platter.width * 1.13
+  readonly property real pivotY: platter.y + platter.height * 0.12
+  readonly property real armLen: platter.width * 0.74       // pivot to stylus
+  readonly property real cwLen: platter.width * 0.08        // pivot to counterweight end
+  readonly property real angleOn: -(68.3 - Math.max(0, Math.min(1, root.progress)) * 20.8)
+  // Parked alongside the platter, never over it.
+  readonly property real angleRest: -88
 
   readonly property color metal: Qt.rgba(
     Color.foreground.r * 0.85 + 0.10, Color.foreground.g * 0.85 + 0.10,
@@ -311,12 +337,11 @@ Item {
   readonly property color metalDark: Qt.darker(metal, 1.9)
   readonly property color housing: Qt.rgba(metal.r * 0.55, metal.g * 0.55, metal.b * 0.58, 1)
 
-  // The arm rest: a small post with a clip, where the headshell parks.
+  // The arm rest: a small post with a clip that holds the tube about halfway
+  // along its length when parked — the headshell hangs on past it.
   Item {
-    // Where the stylus is at angleRest (t = 100 degrees from the arm's
-    // leftward axis): just off the record's right edge.
-    x: root.pivotX - root.armLen * Math.cos(80 * Math.PI / 180) - width / 2
-    y: root.pivotY + root.armLen * Math.sin(80 * Math.PI / 180) - height * 0.5
+    x: root.pivotX - root.armLen * 0.55 * Math.cos(88 * Math.PI / 180) - width / 2
+    y: root.pivotY + root.armLen * 0.55 * Math.sin(88 * Math.PI / 180) - height * 0.5
     width: root.size * 0.048
     height: root.size * 0.05
     z: 1
@@ -391,30 +416,20 @@ Item {
       }
     }
 
-    // Shadow under the tube, so the arm floats above the record.
-    Rectangle {
-      x: root.size * 0.09
-      y: arm.height / 2 - arm.tubeH / 2 + 3
-      width: arm.pivotLocalX - x
-      height: arm.tubeH
-      radius: height / 2
-      color: Qt.rgba(0, 0, 0, 0.35)
-    }
-
-    // The tube: a cylinder, lit from above.
-    Rectangle {
-      id: tube
-      x: root.size * 0.08
-      y: arm.height / 2 - arm.tubeH / 2
-      width: arm.pivotLocalX - x + root.size * 0.02
-      height: arm.tubeH
-      radius: height / 2
+    // The tube, S-curved as on a classic deck: straight out of the bearing,
+    // a gentle bend one way and back the other so the headshell ends up
+    // offset from the pivot line. Three strokes of the same path make it a
+    // cylinder: a soft shadow on the record, the body, a highlight along the
+    // top.
+    readonly property real sOff: -arm.tubeH * 1.6      // lateral offset of the nose
+    readonly property real tubeStart: root.size * 0.085 // where the headshell collar begins
+    Shape {
+      anchors.fill: parent
       antialiasing: true
-      gradient: Gradient {
-        GradientStop { position: 0.0; color: Qt.lighter(root.metal, 1.25) }
-        GradientStop { position: 0.45; color: root.metal }
-        GradientStop { position: 1.0; color: root.metalDark }
-      }
+      layer.enabled: true; layer.samples: 4
+      ArmPath { dy: 3; strokeColor: Qt.rgba(0, 0, 0, 0.35); strokeWidth: arm.tubeH }
+      ArmPath { dy: 0; strokeColor: root.metalDark; strokeWidth: arm.tubeH }
+      ArmPath { dy: -arm.tubeH * 0.22; strokeColor: Qt.lighter(root.metal, 1.2); strokeWidth: Math.max(1, arm.tubeH * 0.45) }
     }
 
     // Counterweight: a fat knurled cylinder behind the pivot.
@@ -450,10 +465,10 @@ Item {
     Item {
       id: headshell
       x: 0
-      y: arm.height / 2 - height / 2
-      width: root.size * 0.11
-      height: arm.tubeH * 2.0
-      transform: Rotation { origin.x: headshell.width; origin.y: headshell.height / 2; angle: -20 }
+      y: arm.height / 2 - height / 2 + arm.sOff
+      width: root.size * 0.12
+      height: arm.tubeH * 2.6
+      transform: Rotation { origin.x: headshell.width; origin.y: headshell.height / 2; angle: 22 }
 
       // Collar where the shell meets the tube.
       Rectangle {

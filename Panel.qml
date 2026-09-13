@@ -1866,7 +1866,7 @@ PanelWindow {
     readonly property real padTop: 6
     readonly property real travel: height - 30
     readonly property real frac: Math.max(0, Math.min(100, value)) / 100
-    readonly property real capY: top + travel * (1 - frac)
+    readonly property real capY: padTop + travel * (1 - frac)
     readonly property color metal: Qt.rgba(Color.foreground.r * 0.85 + 0.10,
                                            Color.foreground.g * 0.85 + 0.10,
                                            Color.foreground.b * 0.85 + 0.10, 1)
@@ -1950,12 +1950,12 @@ PanelWindow {
       anchors.leftMargin: -6
       anchors.rightMargin: -6
       enabled: fader.enabled
-      function apply(y) {
+      function setFromY(y) {
         var v = 100 * (1 - (y - fader.padTop - fader.capH / 2) / fader.travel)
         fader.moved(Math.max(0, Math.min(100, v)))
       }
-      onPressed: function (m) { fader.dragging = true; apply(m.y) }
-      onPositionChanged: function (m) { if (fader.dragging) apply(m.y) }
+      onPressed: function (m) { fader.dragging = true; setFromY(m.y) }
+      onPositionChanged: function (m) { if (fader.dragging) setFromY(m.y) }
       onReleased: fader.dragging = false
       onCanceled: fader.dragging = false
       onWheel: function (w) { fader.moved(Math.max(0, Math.min(100, fader.value + (w.angleDelta.y > 0 ? 3 : -3)))) }
