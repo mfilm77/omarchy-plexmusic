@@ -32,6 +32,7 @@ PanelWindow {
       service.refreshFavourites()
       service.refreshNow()
       if (service.view === "playlists") service.refreshPlaylists()
+      if (service.view === "stations") service.refreshStations(false)
     }
     searchField.forceActiveFocus()
     // Come back to where you were, with the playing song in view.
@@ -55,6 +56,7 @@ PanelWindow {
     if (!service) { dismiss(); return }
     if (service.addOpen) { service.addOpen = false; return }
     if (service.view === "settings") { service.view = "artists"; searchField.forceActiveFocus(); return }
+    if (service.view === "stations" && service.stationPick !== "") { service.stationPick = ""; return }
     if (searchField.text !== "") { searchField.text = ""; return }
     if (service.view !== "artists" && service.view !== "playlists") { service.back(); return }
     dismiss()
@@ -575,6 +577,13 @@ PanelWindow {
               case Qt.Key_L:
                 if (event.modifiers & Qt.ControlModifier) { root.service.setLoop(!root.service.loop); event.accepted = true }
                 break
+              case Qt.Key_1: case Qt.Key_2: case Qt.Key_3: case Qt.Key_4: case Qt.Key_5:
+                if (event.modifiers & Qt.ControlModifier) {
+                  var tabs = { }; tabs[Qt.Key_1] = "starred"; tabs[Qt.Key_2] = "all"; tabs[Qt.Key_3] = "songs"; tabs[Qt.Key_4] = "playlists"; tabs[Qt.Key_5] = "stations"
+                  if (searchField.text !== "") searchField.text = ""
+                  root.service.showTab(tabs[event.key]); event.accepted = true
+                }
+                break
               case Qt.Key_Comma:
                 if (event.modifiers & Qt.ControlModifier) {
                   root.service.openSettings(); addressField.forceActiveFocus(); event.accepted = true
@@ -686,7 +695,7 @@ PanelWindow {
 
           Row {
             spacing: 6
-            visible: !side.searchingNow && (side.view === "artists" || side.view === "playlists" || side.view === "songs")
+            visible: !side.searchingNow && (side.view === "artists" || side.view === "playlists" || side.view === "songs" || side.view === "stations")
 
             ModeTab {
               label: "Starred" + (root.service && root.service.favourites.length > 0
@@ -709,6 +718,11 @@ PanelWindow {
                 ? "  " + root.service.playlists.length : "")
               on: side.view === "playlists"
               onTapped: if (root.service) root.service.showTab("playlists")
+            }
+            ModeTab {
+              label: "Stations"
+              on: side.view === "stations"
+              onTapped: if (root.service) root.service.showTab("stations")
             }
           }
 
@@ -1522,6 +1536,220 @@ PanelWindow {
             font.pixelSize: 11
             color: root.dim(0.35)
           }
+        }
+      }
+    }
+
+    // ---- stations --------------------------------------------------------------
+    //
+    // Plexamp's home, rebuilt: a grid of radio stations built from the
+    // server's own filters, and rows of top albums per decade beneath.
+
+    Flickable {
+      id: stationsPane
+      anchors { top: header.bottom; right: parent.right; bottom: meters.top }
+      anchors.margins: 18
+      anchors.topMargin: 18 + 34 + 12 + 24 + 8
+      width: body.width - deck.width - 22
+      visible: root.service ? (root.service.linked && root.service.view === "stations" && root.service.query === "") : false
+      contentHeight: stationsCol.implicitHeight
+      clip: true
+      boundsBehavior: Flickable.StopAtBounds
+      ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+      readonly property string pick: root.service ? root.service.stationPick : ""
+      readonly property var tiles: [
+        { kind: "library",     label: "Library\nRadio",        glyph: "󰐹", t: 0.00, ok: true },
+        { kind: "deepcuts",    label: "Deep Cuts\nRadio",      glyph: "󰐹", t: 0.15, ok: true },
+        { kind: "timetravel",  label: "Time Travel\nRadio",    glyph: "󰐹", t: 0.30, ok: true },
+        { kind: "randomalbum", label: "Random Album\nRadio",   glyph: "󰐹", t: 0.45, ok: true },
+        { kind: "style",       label: "Style\nRadio",          glyph: "󰐹", t: 0.60, ok: true },
+        { kind: "mood",        label: "Mood\nRadio",           glyph: "󰐹", t: 0.75, ok: true },
+        { kind: "decade",      label: "Decade\nRadio",         glyph: "󰐹", t: 0.90, ok: true },
+        { kind: "artistmix",   label: "Artist Mix\nBuilder",   glyph: "󰠃", t: 0.10, ok: false },
+        { kind: "albummix",    label: "Album Mix\nBuilder",    glyph: "󰝚", t: 0.55, ok: false }
+      ]
+      function tileColor(t, a) {
+        var c1 = Color.accent, c2 = Color.urgent
+        return Qt.rgba(c1.r + (c2.r - c1.r) * t, c1.g + (c2.g - c1.g) * t, c1.b + (c2.b - c1.b) * t, a)
+      }
+
+      Column {
+        id: stationsCol
+        width: stationsPane.width
+        spacing: 18
+
+        // -- picker header when a station needs a choice
+        Row {
+          spacing: 8
+          visible: stationsPane.pick !== ""
+          RowBtn { glyph: "󰁍"; tip: "Back"; onTapped: if (root.service) root.service.stationPick = "" }
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: stationsPane.pick === "decade" ? "Decade Radio — pick a decade"
+                : stationsPane.pick === "style" ? "Style Radio — pick a style" : "Mood Radio — pick a mood"
+            font.pixelSize: 12; font.bold: true; color: Color.foreground
+          }
+        }
+
+        // -- choices
+        Flow {
+          width: parent.width
+          spacing: 8
+          visible: stationsPane.pick !== ""
+          Repeater {
+            model: {
+              if (!root.service) return []
+              if (stationsPane.pick === "decade") return root.service.stationDecades
+              if (stationsPane.pick === "style") return root.service.stationStyles
+              if (stationsPane.pick === "mood") return root.service.stationMoods
+              return []
+            }
+            delegate: Rectangle {
+              readonly property bool isDecade: stationsPane.pick === "decade"
+              width: chipText.implicitWidth + 24
+              height: 30
+              radius: 15
+              color: chipH.hovered ? root.acc(0.22) : root.acc(0.10)
+              border.width: 1
+              border.color: root.acc(0.45)
+              HoverHandler { id: chipH }
+              MouseArea {
+                anchors.fill: parent
+                onClicked: if (root.service) root.service.playStation(stationsPane.pick, isDecade ? modelData.decade : modelData.key)
+              }
+              Text {
+                id: chipText
+                anchors.centerIn: parent
+                text: isDecade ? (modelData.label + "   " + modelData.albums) : modelData.title
+                font.pixelSize: 12
+                color: Color.foreground
+              }
+            }
+          }
+        }
+
+        // -- the tiles
+        Text { visible: stationsPane.pick === ""; text: "STATIONS"; font.pixelSize: 10; font.letterSpacing: 1.6; color: root.dim(0.4) }
+        Flow {
+          width: parent.width
+          spacing: 10
+          visible: stationsPane.pick === ""
+          Repeater {
+            model: stationsPane.tiles
+            delegate: Rectangle {
+              readonly property var tile: modelData
+              width: (stationsCol.width - 20) / 3
+              height: 92
+              radius: 12
+              opacity: tile.ok ? 1 : 0.45
+              gradient: Gradient {
+                GradientStop { position: 0.0; color: stationsPane.tileColor(tile.t, tileH.hovered ? 0.34 : 0.22) }
+                GradientStop { position: 1.0; color: stationsPane.tileColor(Math.min(1, tile.t + 0.35), tileH.hovered ? 0.20 : 0.10) }
+              }
+              border.width: 1
+              border.color: stationsPane.tileColor(tile.t, 0.5)
+              HoverHandler { id: tileH }
+              MouseArea {
+                anchors.fill: parent
+                enabled: tile.ok
+                onClicked: {
+                  if (!root.service) return
+                  if (tile.kind === "decade" || tile.kind === "style" || tile.kind === "mood") root.service.stationPick = tile.kind
+                  else root.service.playStation(tile.kind, "")
+                }
+              }
+              Text {
+                anchors.top: parent.top; anchors.topMargin: 12
+                anchors.left: parent.left; anchors.leftMargin: 14
+                text: tile.glyph
+                font.pixelSize: 20
+                color: Color.foreground
+              }
+              Text {
+                anchors.left: parent.left; anchors.leftMargin: 14
+                anchors.bottom: parent.bottom; anchors.bottomMargin: 10
+                text: tile.label
+                font.pixelSize: 12
+                font.bold: true
+                lineHeight: 1.05
+                color: Color.foreground
+              }
+              Text {
+                visible: !tile.ok
+                anchors.right: parent.right; anchors.rightMargin: 10
+                anchors.top: parent.top; anchors.topMargin: 10
+                text: "soon"
+                font.pixelSize: 9; font.letterSpacing: 1
+                color: root.dim(0.5)
+              }
+            }
+          }
+        }
+
+        // -- top albums per decade
+        Repeater {
+          model: stationsPane.pick === "" && root.service ? root.service.decadeRows : []
+          delegate: Column {
+            width: stationsCol.width
+            spacing: 8
+            readonly property var row: modelData
+            Row {
+              spacing: 10
+              Text { text: "TOP ALBUMS FROM THE " + row.label.toUpperCase(); font.pixelSize: 10; font.letterSpacing: 1.6; color: root.dim(0.4) }
+              Text {
+                text: "radio  󰐊"
+                font.pixelSize: 10; font.letterSpacing: 1
+                color: rr.hovered ? Color.accent : root.dim(0.45)
+                HoverHandler { id: rr }
+                MouseArea { anchors.fill: parent; onClicked: if (root.service) root.service.playStation("decade", row.decade) }
+              }
+            }
+            ListView {
+              width: parent.width
+              height: 118
+              orientation: ListView.Horizontal
+              spacing: 10
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              model: row.albums
+              delegate: Item {
+                width: 84
+                height: 118
+                readonly property var album: modelData
+                HoverHandler { id: alH }
+                MouseArea { anchors.fill: parent; onClicked: if (root.service) root.service.playAlbum(album.key, "") }
+                CoverThumb { id: cv; anchors.top: parent.top; anchors.horizontalCenter: parent.horizontalCenter; size: 84; source: album.artUrl || "" }
+                Rectangle {
+                  anchors.fill: cv; radius: cv.radius
+                  color: "transparent"; border.width: alH.hovered ? 2 : 0; border.color: Color.accent
+                }
+                Text {
+                  anchors.top: cv.bottom; anchors.topMargin: 4
+                  width: parent.width
+                  elide: Text.ElideRight
+                  text: album.title
+                  font.pixelSize: 10
+                  color: Color.foreground
+                }
+                Text {
+                  anchors.bottom: parent.bottom
+                  width: parent.width
+                  elide: Text.ElideRight
+                  text: album.artist
+                  font.pixelSize: 9
+                  color: root.dim(0.5)
+                }
+              }
+            }
+          }
+        }
+
+        Text {
+          visible: root.service && root.service.loadingStations && root.service.decadeRows.length === 0
+          text: "Building stations from your library…"
+          font.pixelSize: 11
+          color: root.dim(0.4)
         }
       }
     }

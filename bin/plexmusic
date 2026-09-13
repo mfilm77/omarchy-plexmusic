@@ -800,12 +800,26 @@ def cmd_status(args) -> None:
     auth = read_json(AUTH_FILE, {})
     settings = read_json(SETTINGS_FILE, {})
     index = read_json(ARTISTS_FILE, {})
+    # When did Plex last scan the music library? If that is newer than our
+    # index, the panel rebuilds the index on its own — new music shows up
+    # without anyone pressing Rescan.
+    scanned_at = None
+    if auth.get("authToken") and settings.get("baseUrl") and settings.get("musicSection"):
+        try:
+            plex = Plex()
+            data = plex.get("/library/sections", timeout=4)
+            for d in data.get("MediaContainer", {}).get("Directory", []) or []:
+                if str(d.get("key")) == str(settings.get("musicSection")):
+                    scanned_at = max(int(d.get("scannedAt") or 0), int(d.get("updatedAt") or 0))
+        except Exception:
+            scanned_at = None
     payload = {
         "linked": bool(auth.get("authToken")),
         "server": settings.get("baseUrl"),
         "section": settings.get("musicSection"),
         "artistCount": len(index.get("artists", [])),
         "indexedAt": index.get("indexedAt"),
+        "libraryScannedAt": scanned_at,
         "favourites": len(read_json(FAVOURITES_FILE, {"items": []}).get("items", [])),
         "playing": mpv_running(),
     }
@@ -980,6 +994,11 @@ def cmd_play(args) -> None:
                 start_index = i
                 break
 
+    start_queue(plex, tracks, source, bool(args.shuffle), start_index, bool(args.loop))
+
+
+def start_queue(plex, tracks, source, shuffle, start_index=0, loop=False) -> None:
+    """Write the m3u + queue file for these tracks and hand them to mpv."""
     lines = ["#EXTM3U"]
     for t in tracks:
         seconds = int((t["duration"] or 0) / 1000)
@@ -1002,18 +1021,132 @@ def cmd_play(args) -> None:
     write_json(QUEUE_FILE, {
         "startedAt": int(time.time()),
         "source": source,
-        "shuffle": bool(args.shuffle),
+        "shuffle": shuffle,
         "tracks": tracks,
     })
 
-    mpv_launch(PLAYLIST_FILE, shuffle=args.shuffle, start_index=start_index,
-               loop=bool(args.loop))
+    mpv_launch(PLAYLIST_FILE, shuffle=shuffle, start_index=start_index,
+               loop=loop)
     # Warm the cover of the track that will sound first.
     first_art = None
     if tracks:
         first_art = plex.art_path(tracks[start_index].get("albumThumb", ""))
     emit({"trackCount": len(tracks), "source": source,
-          "shuffle": bool(args.shuffle), "art": first_art})
+          "shuffle": shuffle, "art": first_art})
+
+
+DECADES = [1950, 1960, 1970, 1980, 1990, 2000, 2010, 2020]
+
+
+def cmd_stations(args) -> None:
+    """What the Stations tab can offer: decades with counts, styles, moods."""
+    plex = Plex()
+    plex.resolve_base()
+    decades = []
+    for d in DECADES:
+        data = plex.get(f"/library/sections/{plex.section}/all",
+                        {"type": 9, "decade": d, "X-Plex-Container-Start": 0,
+                         "X-Plex-Container-Size": 1})
+        c = data.get("MediaContainer", {})
+        total = int(c.get("totalSize") or c.get("size") or 0)
+        if total:
+            decades.append({"decade": d, "label": f"{str(d)[2:]}s", "albums": total})
+
+    def directory(kind):
+        data = plex.get(f"/library/sections/{plex.section}/{kind}", {"type": 10})
+        out = []
+        for m in data.get("MediaContainer", {}).get("Directory", []) or []:
+            if m.get("key") and m.get("title"):
+                out.append({"key": str(m["key"]), "title": m["title"]})
+        return out
+    emit({"decades": decades, "styles": directory("genre"), "moods": directory("mood")})
+
+
+def cmd_decades(args) -> None:
+    """The 'Top albums from the 1970s' rows: a dozen albums per decade."""
+    plex = Plex()
+    plex.resolve_base()
+    rows = []
+    for d in DECADES:
+        data = plex.get(f"/library/sections/{plex.section}/all",
+                        {"type": 9, "decade": d, "sort": "lastViewedAt:desc",
+                         "X-Plex-Container-Start": 0, "X-Plex-Container-Size": args.size})
+        c = data.get("MediaContainer", {})
+        albums = []
+        for m in c.get("Metadata", []) or []:
+            thumb = m.get("thumb") or m.get("parentThumb") or ""
+            albums.append({"key": str(m.get("ratingKey")), "title": m.get("title") or "",
+                           "artist": m.get("parentTitle") or "", "year": m.get("year") or 0,
+                           "artUrl": plex.art_url(thumb, 200)})
+        if albums:
+            rows.append({"decade": d, "label": f"{str(d)[2:]}s", "albums": albums})
+    emit({"rows": rows})
+
+
+def _random_tracks(plex, extra: dict, size: int) -> list[dict]:
+    q = {"type": 10, "sort": "random", "X-Plex-Container-Start": 0,
+         "X-Plex-Container-Size": size}
+    q.update(extra)
+    return plex.tracks_at(f"/library/sections/{plex.section}/all?" + urllib.parse.urlencode(q))
+
+
+def _tracks_from_decade(plex, decade: int, albums: int, per_album: int) -> list[dict]:
+    import random
+    data = plex.get(f"/library/sections/{plex.section}/all",
+                    {"type": 9, "decade": decade, "sort": "random",
+                     "X-Plex-Container-Start": 0, "X-Plex-Container-Size": albums})
+    out: list[dict] = []
+    for m in data.get("MediaContainer", {}).get("Metadata", []) or []:
+        tracks = plex.album_tracks(str(m.get("ratingKey")))
+        random.shuffle(tracks)
+        out.extend(tracks[:per_album])
+    random.shuffle(out)
+    return out
+
+
+def cmd_station(args) -> None:
+    """Build a radio queue the way Plexamp does — client side, from filters."""
+    import random
+    plex = Plex()
+    plex.resolve_base()
+    kind = args.kind
+    size = args.size
+    shuffle = False
+    if kind == "library":
+        tracks = _random_tracks(plex, {}, size)
+    elif kind == "deepcuts":
+        # Never-played tracks; the closest the server gets to 'deep cuts'.
+        tracks = _random_tracks(plex, {"unwatched": 1}, size)
+    elif kind == "randomalbum":
+        data = plex.get(f"/library/sections/{plex.section}/all",
+                        {"type": 9, "sort": "random", "X-Plex-Container-Start": 0,
+                         "X-Plex-Container-Size": 4})
+        tracks = []
+        for m in data.get("MediaContainer", {}).get("Metadata", []) or []:
+            tracks.extend(plex.album_tracks(str(m.get("ratingKey"))))
+    elif kind == "decade":
+        if not args.decade:
+            die("decade station needs --decade 1970")
+        tracks = _tracks_from_decade(plex, int(args.decade), albums=16, per_album=3)
+    elif kind == "timetravel":
+        tracks = []
+        for d in DECADES:
+            tracks.extend(_tracks_from_decade(plex, d, albums=3, per_album=2))
+        random.shuffle(tracks)
+    elif kind == "style":
+        if not args.key:
+            die("style station needs --key GENRE")
+        tracks = _random_tracks(plex, {"genre": args.key}, size)
+    elif kind == "mood":
+        if not args.key:
+            die("mood station needs --key MOOD")
+        tracks = _random_tracks(plex, {"mood": args.key}, size)
+    else:
+        die(f"unknown station: {kind}")
+    if not tracks:
+        die("that station came up empty")
+    start_queue(plex, tracks, {"station": kind, "decade": args.decade, "key": args.key},
+                shuffle, 0, bool(args.loop))
 
 
 def cmd_cmd(args) -> None:
@@ -1179,6 +1312,21 @@ def main() -> None:
     p.add_argument("--title", help="new playlist title (create)")
     p.add_argument("--tracks", help="comma-separated track ratingKeys")
     p.set_defaults(func=cmd_playlists)
+
+    sub.add_parser("stations", help="decades, styles and moods for the Stations tab").set_defaults(func=cmd_stations)
+
+    p = sub.add_parser("decades", help="top albums per decade")
+    p.add_argument("--size", type=int, default=12)
+    p.set_defaults(func=cmd_decades)
+
+    p = sub.add_parser("station", help="build and play a radio queue")
+    p.add_argument("kind", choices=["library", "deepcuts", "randomalbum", "decade",
+                                    "timetravel", "style", "mood"])
+    p.add_argument("--decade", type=int)
+    p.add_argument("--key", help="genre or mood key")
+    p.add_argument("--size", type=int, default=100)
+    p.add_argument("--loop", action="store_true")
+    p.set_defaults(func=cmd_station)
 
     p = sub.add_parser("play")
     p.add_argument("--key", help="artist ratingKey")

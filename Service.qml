@@ -77,6 +77,17 @@ Item {
   property bool addBusy: false
   property string toast: ""
 
+  // ---- stations -----------------------------------------------------------
+  // Radio built client-side from the server's filters, as Plexamp does.
+  property var stationDecades: []      // [{decade, label, albums}]
+  property var stationStyles: []       // [{key, title}]
+  property var stationMoods: []
+  property var decadeRows: []          // [{decade, label, albums:[...]}]
+  property bool stationsLoaded: false
+  property bool loadingStations: false
+  property real stationsAt: 0          // when the decade rows were last fetched
+  property string stationPick: ""      // "", "decade", "style", "mood"
+
   // ---- settings -----------------------------------------------------------
   property var servers: []            // from `server`: uri, source, reachable, ms
   property bool loadingServers: false
@@ -221,9 +232,18 @@ Item {
         if (!d) return
         root.linked = !!d.linked
         root.server = d.server || ""
+        // The library was scanned since we indexed it: rebuild quietly, so
+        // anything added to Plex appears here without a manual rescan.
+        if (d.linked && d.libraryScannedAt && d.indexedAt && d.libraryScannedAt > d.indexedAt
+            && !root.indexing && (Date.now() - root.lastAutoIndex) > 600000) {
+          root.lastAutoIndex = Date.now()
+          root.reindex()
+          root.stationsLoaded = false
+        }
       }
     }
   }
+  property real lastAutoIndex: 0
 
   Process {
     id: favProc
@@ -573,6 +593,54 @@ Item {
     tracksProc.running = true
   }
 
+  Process {
+    id: stationsProc
+    command: [root.helper, "stations"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var d = root.parse(text)
+        if (d && d.decades) {
+          root.stationDecades = d.decades
+          root.stationStyles = d.styles || []
+          root.stationMoods = d.moods || []
+          root.stationsLoaded = true
+        }
+        decadesProc.running = true
+      }
+    }
+  }
+  Process {
+    id: decadesProc
+    command: [root.helper, "decades", "--size", "14"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        root.loadingStations = false
+        var d = root.parse(text)
+        if (d && d.rows) root.decadeRows = d.rows
+      }
+    }
+  }
+
+  function refreshStations(force) {
+    if (root.loadingStations) return
+    // Ten minutes is fresh enough; the radios themselves are built live.
+    if (root.stationsLoaded && !force && (Date.now() - root.stationsAt) < 600000) return
+    root.loadingStations = true
+    root.stationsAt = Date.now()
+    stationsProc.running = true
+  }
+
+  // kind: library | deepcuts | randomalbum | timetravel | decade | style | mood
+  function playStation(kind, value) {
+    var args = [root.helper, "station", String(kind)]
+    if (kind === "decade") args.push("--decade", String(value))
+    else if (kind === "style" || kind === "mood") args.push("--key", String(value))
+    if (root.loop) args.push("--loop")
+    root.stationPick = ""
+    playProc.command = args
+    playProc.running = true
+  }
+
   function showTab(tab) {
     if (tab === "playlists") {
       root.view = "playlists"
@@ -580,6 +648,7 @@ Item {
       return
     }
     if (tab === "songs") { root.view = "songs"; return }
+    if (tab === "stations") { root.view = "stations"; root.stationPick = ""; root.refreshStations(false); return }
     root.browseAll = (tab === "all")
     root.view = "artists"
   }
