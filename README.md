@@ -17,6 +17,13 @@ nothing via the cloud.
 - **All artists** — the whole library A–Z with a jump strip.
 - **Playlists** — your Plex playlists (the real ones; they show up in every
   other Plex app).
+- **Stations** — radio built from your own library the way Plexamp does it:
+  Library Radio, Deep Cuts (tracks you have never played), Time Travel (every
+  decade at once), Random Album, Style, Mood and Decade Radio, plus rows of
+  top albums per decade. Each station is built from the server the moment you
+  press it, so anything you add to Plex is in it straight away.
+- The index of artists and songs rebuilds itself whenever Plex reports the
+  library was scanned after the index was built — no manual rescan needed.
 - Open an artist for their **albums** (covers, years), an album for its
   **tracks**. Every row has play; clicking a track plays the album from there.
 - The **+** on a track, an album, or "Add all" opens *Add to playlist*: pick an
@@ -34,6 +41,7 @@ Keyboard, with the cursor in the search box the whole time:
 | ← / Backspace (empty box) | back |
 | Ctrl+P | add the highlighted track or album to a playlist |
 | Ctrl+L | repeat on/off — start again when the album, playlist or queue ends |
+| Ctrl+1 … Ctrl+5 | Starred · All artists · Songs · Playlists · Stations |
 | Esc | close the popup, clear the search, go back, then close the panel |
 
 ## Why this rather than the other Plex plugins
