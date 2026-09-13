@@ -28,7 +28,9 @@ Item {
   Canvas {
     id: neon
     anchors.centerIn: platter
-    width: platter.width * 1.30
+    // Wide enough that the glow has died away long before the edge of the
+    // canvas — a glow cut by its own box reads as a square.
+    width: platter.width * 2.2
     height: width
     z: -1
     antialiasing: true
@@ -42,24 +44,28 @@ Item {
       var c = width / 2, r = platter.width / 2
       var a = Color.accent, u = Color.urgent
       function rgba(col, al) { return "rgba(" + Math.round(col.r*255) + "," + Math.round(col.g*255) + "," + Math.round(col.b*255) + "," + al + ")" }
-      // Each pass is a ring of short overlapping arcs; the colour of every arc
-      // is a cosine blend between the two tones by angle, so the drift from
-      // pink to blue and back has no seams — a conical gradient banded here.
-      var passes = [[1.010, 3, 0.55], [1.016, 8, 0.28], [1.028, 18, 0.14], [1.050, 34, 0.07], [1.085, 56, 0.035]]
-      var segs = 120, step = Math.PI * 2 / segs
-      ctx.lineCap = "butt"
-      for (var i = 0; i < passes.length; i++) {
-        var rr = r * passes[i][0] + passes[i][1] / 2, al = passes[i][2]
-        ctx.lineWidth = passes[i][1]
-        for (var k = 0; k < segs; k++) {
-          var t0 = k * step, mid = t0 + step / 2
-          // two full pink/blue cycles around the ring, phase-shifted so pink
-          // sits top-right and bottom-left like the reference photo
-          var w = 0.5 + 0.5 * Math.cos(2 * mid - 0.9)
-          var cr = u.r * w + a.r * (1 - w), cg = u.g * w + a.g * (1 - w), cb = u.b * w + a.b * (1 - w)
-          ctx.strokeStyle = "rgba(" + Math.round(cr*255) + "," + Math.round(cg*255) + "," + Math.round(cb*255) + "," + al + ")"
-          ctx.beginPath(); ctx.arc(c, c, rr, t0 - step * 0.35, t0 + step * 1.35); ctx.stroke()
+      // Many thin full rings, alpha falling off smoothly with radius (no
+      // steps), each carrying a conical gradient with 48 stops sampled from a
+      // cosine blend of the two tones (no seams). Two pink/blue cycles around
+      // the ring, phased so pink sits top-right and bottom-left.
+      function blend(w) {
+        return [u.r * w + a.r * (1 - w), u.g * w + a.g * (1 - w), u.b * w + a.b * (1 - w)]
+      }
+      var rings = 44
+      for (var i = 0; i < rings; i++) {
+        var f = i / (rings - 1)
+        var rr = r * (1.006 + 0.58 * Math.pow(f, 1.4))  // out to ~1.6 r
+        var lw = 2 + 14 * f                              // widths overlap for a solid falloff
+        var al = 0.50 * Math.pow(1 - f, 3.0)             // and reach zero at the last ring
+        var g = ctx.createConicalGradient(c, c, 0)
+        for (var q = 0; q <= 48; q++) {
+          var ang = q / 48 * Math.PI * 2
+          var w = 0.5 + 0.5 * Math.cos(2 * ang - 0.9)
+          var col = blend(w)
+          g.addColorStop(q / 48, "rgba(" + Math.round(col[0]*255) + "," + Math.round(col[1]*255) + "," + Math.round(col[2]*255) + "," + al + ")")
         }
+        ctx.strokeStyle = g; ctx.lineWidth = lw
+        ctx.beginPath(); ctx.arc(c, c, rr, 0, Math.PI * 2); ctx.stroke()
       }
     }
   }
@@ -443,10 +449,12 @@ Item {
     id: arm
     // Local frame: the pivot is at (pivotLocalX, height/2); the tube runs
     // toward x = 0 where the headshell sits; the counterweight is to the right.
-    readonly property real pad: root.size * 0.06
+    // Generous room past the nose and above/below the line: the headshell is
+    // rotated and must never touch the edge of its own painting box.
+    readonly property real pad: root.size * 0.16
     readonly property real pivotLocalX: pad + root.armLen
-    width: pivotLocalX + root.cwLen + pad
-    height: root.size * 0.20
+    width: pivotLocalX + root.cwLen + root.size * 0.06
+    height: root.size * 0.34
     x: root.pivotX - pivotLocalX
     y: root.pivotY - height / 2
     z: 2

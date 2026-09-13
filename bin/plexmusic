@@ -29,6 +29,7 @@ AUTH_FILE = os.path.join(CONFIG_DIR, "auth.json")
 SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
 FAVOURITES_FILE = os.path.join(CONFIG_DIR, "favourites.json")
 ARTISTS_FILE = os.path.join(DATA_DIR, "artists.json")
+TRACKS_FILE = os.path.join(DATA_DIR, "tracks.json")
 QUEUE_FILE = os.path.join(DATA_DIR, "queue.json")
 PLAYLIST_FILE = os.path.join(DATA_DIR, "queue.m3u")
 CACHE_DIR = os.path.join(
@@ -419,6 +420,41 @@ class Plex:
             })
         return tracks
 
+    def all_tracks(self, page: int = 5000) -> list[dict]:
+        """Every track, slim, in Plex's title order — the song search index."""
+        out: list[dict] = []
+        start = 0
+        while True:
+            data = self.get(
+                f"/library/sections/{self.section}/all",
+                {"type": 10, "X-Plex-Container-Start": start,
+                 "X-Plex-Container-Size": page})
+            container = data.get("MediaContainer", {})
+            batch = container.get("Metadata") or []
+            for m in batch:
+                title = m.get("title") or ""
+                if not title:
+                    continue
+                sort_key = fold(m.get("titleSort") or title).lstrip()
+                first = sort_key[:1] or "#"
+                out.append({
+                    "key": str(m.get("ratingKey")),
+                    "title": title,
+                    "artist": m.get("grandparentTitle") or "",
+                    "album": m.get("parentTitle") or "",
+                    "albumKey": str(m.get("parentRatingKey") or ""),
+                    "artistKey": str(m.get("grandparentRatingKey") or ""),
+                    "duration": int(m.get("duration") or 0),
+                    "thumb": m.get("parentThumb") or "",
+                    "fold": fold(title),
+                    "letter": first.upper() if "a" <= first <= "z" else "#",
+                })
+            total = container.get("totalSize", len(out))
+            start += len(batch)
+            if not batch or start >= total:
+                break
+        return out
+
     def artist_tracks(self, rating_key: str) -> list[dict]:
         return self.tracks_at(f"/library/metadata/{rating_key}/allLeaves")
 
@@ -618,7 +654,7 @@ def cmd_link(args) -> None:
     if args.action == "forget":
         # Wipe every trace of the account from this machine.
         for path in (AUTH_FILE, PENDING_PIN_FILE, SETTINGS_FILE,
-                     ARTISTS_FILE, QUEUE_FILE, PLAYLIST_FILE):
+                     ARTISTS_FILE, TRACKS_FILE, QUEUE_FILE, PLAYLIST_FILE):
             try:
                 os.unlink(path)
             except OSError:
@@ -719,10 +755,11 @@ def cmd_sections(args) -> None:
         plex.settings["musicSection"] = str(args.use)
         write_json(SETTINGS_FILE, plex.settings)
         # The index belongs to the old section; it is rebuilt on demand.
-        try:
-            os.unlink(ARTISTS_FILE)
-        except OSError:
-            pass
+        for path in (ARTISTS_FILE, TRACKS_FILE):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     data = plex.get("/library/sections")
     out = []
     for d in data.get("MediaContainer", {}).get("Directory", []) or []:
@@ -772,7 +809,15 @@ def cmd_index(args) -> None:
         "section": plex.section,
         "artists": artists,
     }, mode=0o644)
-    emit({"artistCount": len(artists), "server": plex.base, "section": plex.section})
+    tracks = plex.all_tracks()
+    write_json(TRACKS_FILE, {
+        "indexedAt": int(time.time()),
+        "server": plex.base,
+        "section": plex.section,
+        "tracks": tracks,
+    }, mode=0o644)
+    emit({"artistCount": len(artists), "trackCount": len(tracks),
+          "server": plex.base, "section": plex.section})
 
 
 def load_index() -> list[dict]:

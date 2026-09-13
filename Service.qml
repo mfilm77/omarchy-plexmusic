@@ -26,6 +26,7 @@ Item {
   readonly property string helper: pluginDir + "bin/plexmusic"
   readonly property string home: Quickshell.env("HOME")
   readonly property string indexPath: home + "/.local/share/omarchy-plex-music/artists.json"
+  readonly property string trackIndexPath: home + "/.local/share/omarchy-plex-music/tracks.json"
 
   // ---- account + server ---------------------------------------------------
   property bool linked: false
@@ -43,8 +44,16 @@ Item {
   // First index of each letter, for the A-Z jump strip.
   property var letterIndex: ({})
   property var favourites: []
-  property var searchResults: []
+  property var searchResults: []          // artists matching the query
+  property var trackResults: []           // songs matching the query
+  // One list for the search view: artist rows then song rows, each tagged.
+  property var searchItems: []
   property string query: ""
+  // Every track, slim, in Plex's title order: key, title, artist, album,
+  // albumKey, duration, fold, letter.
+  property var allTracks: []
+  readonly property int trackCount: allTracks.length
+  property var trackLetterIndex: ({})
 
   // ---- browsing -----------------------------------------------------------
   // What the right-hand column is showing: "artists" (starred, all, or search
@@ -126,6 +135,27 @@ Item {
     onFileChanged: reload()
   }
 
+  FileView {
+    id: trackIndexFile
+    path: root.trackIndexPath
+    watchChanges: true
+    onLoaded: root.applyTrackIndex()
+    onFileChanged: reload()
+  }
+
+  function applyTrackIndex() {
+    var d = root.parse(trackIndexFile.text())
+    var list = (d && d.tracks) ? d.tracks : []
+    var idx = {}
+    for (var i = 0; i < list.length; i++) {
+      var l = list[i].letter || "#"
+      if (idx[l] === undefined) idx[l] = i
+    }
+    root.allTracks = list
+    root.trackLetterIndex = idx
+    if (root.query !== "") root.search(root.query)
+  }
+
   function applyIndex() {
     var d = root.parse(indexFile.text())
     var list = (d && d.artists) ? d.artists : []
@@ -142,16 +172,38 @@ Item {
   function search(text) {
     root.query = text || ""
     var q = fold(root.query.trim())
-    if (q === "") { root.searchResults = []; return }
+    if (q === "") { root.searchResults = []; root.trackResults = []; root.searchItems = []; return }
     var starts = [], contains = []
     var list = root.artists
     for (var i = 0; i < list.length; i++) {
       var k = list[i].fold || fold(list[i].title)
       if (k.indexOf(q) === 0) starts.push(list[i])
       else if (k.indexOf(q) >= 0) contains.push(list[i])
-      if (starts.length >= 100) break
+      if (starts.length >= 40) break
     }
-    root.searchResults = starts.concat(contains).slice(0, 100)
+    root.searchResults = starts.concat(contains).slice(0, 40)
+
+    // Songs: prefix matches first, then anywhere in the title, capped so a
+    // one-letter query does not build a 60,000-row list.
+    var ts = [], tc = []
+    var tl = root.allTracks
+    for (var j = 0; j < tl.length; j++) {
+      var tk = tl[j].fold
+      if (tk.indexOf(q) === 0) ts.push(tl[j])
+      else if (tc.length < 80 && tk.indexOf(q) >= 0) tc.push(tl[j])
+      if (ts.length >= 80) break
+    }
+    root.trackResults = ts.concat(tc).slice(0, 80)
+
+    var items = []
+    for (var a = 0; a < root.searchResults.length; a++)
+      items.push({ kind: "artist", key: root.searchResults[a].key, title: root.searchResults[a].title })
+    for (var t = 0; t < root.trackResults.length; t++) {
+      var tr = root.trackResults[t]
+      items.push({ kind: "track", key: tr.key, title: tr.title, artist: tr.artist, album: tr.album,
+                   albumKey: tr.albumKey, artistKey: tr.artistKey, duration: tr.duration })
+    }
+    root.searchItems = items
   }
 
   // ---- helper calls -------------------------------------------------------
@@ -507,6 +559,7 @@ Item {
       root.refreshPlaylists()
       return
     }
+    if (tab === "songs") { root.view = "songs"; return }
     root.browseAll = (tab === "all")
     root.view = "artists"
   }

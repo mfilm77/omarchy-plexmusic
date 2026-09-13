@@ -123,6 +123,7 @@ PanelWindow {
       anchors { top: parent.top; left: parent.left; right: parent.right }
       anchors.margins: 18
       height: 30
+      z: 2
 
       Text {
         id: heading
@@ -311,8 +312,9 @@ PanelWindow {
         Fader {
           anchors.right: parent.right
           anchors.rightMargin: 2
+          // Top stays level with the arm rest; the extra length runs downward.
           anchors.bottom: vinyl.bottom
-          anchors.bottomMargin: 6
+          anchors.bottomMargin: -50
           value: root.service ? root.service.volume : 100
           enabled: root.service ? root.service.playing : false
           onMoved: function (v) { if (root.service) root.service.setVolume(v) }
@@ -482,7 +484,8 @@ PanelWindow {
         readonly property bool searchingNow: root.service ? root.service.query !== "" : false
         readonly property bool showingAll: view === "artists" && !searchingNow
           && root.service && root.service.browseAll
-        readonly property bool inArtists: view === "artists" || searchingNow
+        readonly property bool inArtists: view === "artists" && !searchingNow
+        readonly property bool inSongs: view === "songs" && !searchingNow
 
         readonly property bool inSettings: view === "settings"
 
@@ -567,6 +570,8 @@ PanelWindow {
         // Which list the keyboard is steering, and what Enter does to its row.
         readonly property var activeList: {
           if (side.inSettings) return null
+          if (side.searchingNow) return searchList
+          if (side.inSongs) return songsList
           if (side.inArtists) return artistList
           if (side.view === "albums") return albumList
           if (side.view === "tracks") return trackList
@@ -590,9 +595,12 @@ PanelWindow {
           if (!root.service) return
           if (!item) {
             // Nothing highlighted while searching: Enter takes the top hit.
-            if (side.searchingNow && root.service.searchResults.length > 0)
-              side.openArtistRow(root.service.searchResults[0])
-            return
+            if (side.searchingNow && root.service.searchItems.length > 0) item = root.service.searchItems[0]
+            else return
+          }
+          if (side.searchingNow || side.inSongs) {
+            if (item.kind === "artist") { side.openArtistRow(item); return }
+            root.service.playAlbum(item.albumKey, item.key); return
           }
           if (side.inArtists) side.openArtistRow(item)
           else if (side.view === "albums") root.service.openAlbum(item)
@@ -606,8 +614,12 @@ PanelWindow {
           var item = currentItem()
           if (!root.service) return
           if (!item) {
-            if (side.searchingNow && root.service.searchResults.length > 0)
-              root.service.playArtist(root.service.searchResults[0].key)
+            if (side.searchingNow && root.service.searchItems.length > 0) item = root.service.searchItems[0]
+            else return
+          }
+          if (side.searchingNow || side.inSongs) {
+            if (item.kind === "artist") root.service.playArtist(item.key)
+            else root.service.playAlbum(item.albumKey, item.key)
             return
           }
           if (side.inArtists) root.service.playArtist(item.key)
@@ -625,6 +637,8 @@ PanelWindow {
             root.service.requestAdd(item ? [item.key] : trackList.allKeys())
           } else if (side.view === "albums" && item) {
             root.service.requestAddAlbum(item.key)
+          } else if ((side.searchingNow || side.inSongs) && item && item.kind !== "artist") {
+            root.service.requestAdd([item.key])
           }
         }
 
@@ -638,7 +652,7 @@ PanelWindow {
 
           Row {
             spacing: 6
-            visible: !side.searchingNow && (side.view === "artists" || side.view === "playlists")
+            visible: !side.searchingNow && (side.view === "artists" || side.view === "playlists" || side.view === "songs")
 
             ModeTab {
               label: "Starred" + (root.service && root.service.favourites.length > 0
@@ -652,6 +666,11 @@ PanelWindow {
               onTapped: if (root.service) root.service.showTab("all")
             }
             ModeTab {
+              label: "Songs" + (root.service && root.service.trackCount > 0 ? "  " + root.service.trackCount : "")
+              on: side.view === "songs"
+              onTapped: if (root.service) root.service.showTab("songs")
+            }
+            ModeTab {
               label: "Playlists" + (root.service && root.service.playlists.length > 0
                 ? "  " + root.service.playlists.length : "")
               on: side.view === "playlists"
@@ -662,7 +681,7 @@ PanelWindow {
           Text {
             anchors.verticalCenter: parent.verticalCenter
             visible: side.searchingNow
-            text: root.service ? root.service.searchResults.length + " matches" : ""
+            text: root.service ? (root.service.searchResults.length + " artists  ·  " + root.service.trackResults.length + " songs") : ""
             font.pixelSize: 10
             font.letterSpacing: 1.2
             color: root.dim(0.4)
@@ -709,7 +728,7 @@ PanelWindow {
           anchors { top: nav.bottom; right: parent.right; bottom: parent.bottom }
           anchors.topMargin: 8
           width: 16
-          visible: side.showingAll
+          visible: side.showingAll || side.inSongs
           readonly property var letters: ["#","A","B","C","D","E","F","G","H","I","J","K","L","M",
                                           "N","O","P","Q","R","S","T","U","V","W","X","Y","Z"]
           readonly property real slot: Math.max(1, height / letters.length)
@@ -720,7 +739,7 @@ PanelWindow {
               width: alphabet.width
               height: alphabet.slot
               readonly property bool present: root.service
-                && root.service.letterIndex[modelData] !== undefined
+                && ((side.inSongs ? root.service.trackLetterIndex : root.service.letterIndex)[modelData] !== undefined)
 
               Text {
                 anchors.centerIn: parent
@@ -736,8 +755,13 @@ PanelWindow {
                 hoverEnabled: true
                 enabled: present
                 onClicked: {
-                  var i = root.service.letterIndex[modelData]
-                  if (i !== undefined) artistList.positionViewAtIndex(i, ListView.Beginning)
+                  if (side.inSongs) {
+                    var j = root.service.trackLetterIndex[modelData]
+                    if (j !== undefined) songsList.positionViewAtIndex(j, ListView.Beginning)
+                  } else {
+                    var i = root.service.letterIndex[modelData]
+                    if (i !== undefined) artistList.positionViewAtIndex(i, ListView.Beginning)
+                  }
                 }
               }
             }
@@ -770,7 +794,6 @@ PanelWindow {
           cacheBuffer: 400
           model: {
             if (!root.service) return []
-            if (side.searchingNow) return root.service.searchResults
             return root.service.browseAll ? root.service.artists : root.service.favourites
           }
 
@@ -874,17 +897,156 @@ PanelWindow {
 
           Text {
             anchors.centerIn: parent
-            visible: artistList.count === 0 && side.searchingNow
-            text: "Nothing matches that."
+            visible: artistList.count === 0 && side.showingAll
+            text: root.service && root.service.indexing ? "Indexing the library…"
+                                                        : "No index yet — press the rescan button above."
             font.pixelSize: 11
             color: root.dim(0.35)
+          }
+        }
+
+        // ---- search results: artists then songs -------------------------------
+        ListView {
+          id: searchList
+          anchors { top: nav.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
+          anchors.topMargin: 8
+          visible: side.searchingNow
+          clip: true
+          spacing: 2
+          boundsBehavior: Flickable.StopAtBounds
+          reuseItems: true
+          cacheBuffer: 400
+          currentIndex: -1
+          highlightMoveDuration: 80
+          highlight: Rectangle {
+            radius: 7
+            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+            border.width: 1
+            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45)
+            z: -1
+          }
+          onModelChanged: currentIndex = -1
+          model: root.service ? root.service.searchItems : []
+          section.property: "kind"
+          section.criteria: ViewSection.FullString
+          section.delegate: Item {
+            width: searchList.width
+            height: 24
+            Text {
+              anchors.left: parent.left
+              anchors.leftMargin: 10
+              anchors.verticalCenter: parent.verticalCenter
+              text: section === "artist" ? "ARTISTS" : "SONGS"
+              font.pixelSize: 10
+              font.letterSpacing: 1.6
+              color: root.dim(0.4)
+            }
+          }
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          delegate: Item {
+            width: searchList.width
+            height: modelData && modelData.kind === "artist" ? 34 : 38
+            readonly property var item: modelData
+
+            // artist row
+            Rectangle {
+              anchors.fill: parent
+              visible: item && item.kind === "artist"
+              radius: 7
+              readonly property bool starred: root.service && item ? root.service.isFavourite(item.key) : false
+              color: aH.hovered ? root.dim(0.08) : "transparent"
+              HoverHandler { id: aH }
+              MouseArea { anchors.fill: parent; onClicked: side.openArtistRow(item) }
+              Text {
+                anchors.left: parent.left; anchors.leftMargin: 10
+                anchors.right: aActs.left; anchors.rightMargin: 6
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideRight
+                text: item ? item.title : ""
+                font.pixelSize: 12
+                color: Color.foreground
+              }
+              Row {
+                id: aActs
+                anchors.right: parent.right; anchors.rightMargin: 6
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 2
+                RowBtn { glyph: "󰐊"; tip: "Play this artist"; strong: true; visible: aH.hovered
+                         onTapped: if (root.service) root.service.playArtist(item.key) }
+                RowBtn { glyph: parent.parent.starred ? "★" : "☆"; tip: "Star"; accentOn: parent.parent.starred
+                         onTapped: if (root.service) root.service.toggleFavourite(item.key, item.title) }
+              }
+            }
+
+            TrackRow {
+              anchors.fill: parent
+              visible: item && item.kind === "track"
+              track: item
+            }
           }
 
           Text {
             anchors.centerIn: parent
-            visible: artistList.count === 0 && side.showingAll
-            text: root.service && root.service.indexing ? "Indexing the library…"
-                                                        : "No index yet — press the rescan button above."
+            visible: searchList.count === 0
+            text: "Nothing matches that."
+            font.pixelSize: 11
+            color: root.dim(0.35)
+          }
+        }
+
+        // ---- every song, A-Z ---------------------------------------------------
+        ListView {
+          id: songsList
+          anchors { top: nav.bottom; left: parent.left; bottom: parent.bottom }
+          anchors.topMargin: 8
+          anchors.right: alphabet.left
+          anchors.rightMargin: 6
+          visible: side.inSongs
+          clip: true
+          spacing: 1
+          boundsBehavior: Flickable.StopAtBounds
+          reuseItems: true
+          cacheBuffer: 600
+          currentIndex: -1
+          highlightMoveDuration: 80
+          highlight: Rectangle {
+            radius: 7
+            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+            border.width: 1
+            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45)
+            z: -1
+          }
+          onModelChanged: currentIndex = -1
+          model: root.service ? root.service.allTracks : []
+          section.property: "letter"
+          section.criteria: ViewSection.FullString
+          section.labelPositioning: ViewSection.InlineLabels | ViewSection.CurrentLabelAtStart
+          section.delegate: Item {
+            width: songsList.width
+            height: 26
+            Rectangle { anchors.fill: parent; color: Color.popups.background }
+            Text {
+              anchors.left: parent.left; anchors.leftMargin: 10
+              anchors.verticalCenter: parent.verticalCenter
+              text: section
+              font.pixelSize: 11; font.bold: true; font.letterSpacing: 1.5
+              color: Color.accent
+            }
+            Rectangle {
+              anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+              anchors.leftMargin: 10
+              height: 1
+              color: root.acc(0.25)
+            }
+          }
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+          delegate: TrackRow { width: songsList.width; height: 38; track: modelData }
+
+          Text {
+            anchors.centerIn: parent
+            visible: songsList.count === 0
+            text: root.service && root.service.indexing ? "Indexing the library…" : "No song index yet — press the rescan button above."
             font.pixelSize: 11
             color: root.dim(0.35)
           }
@@ -1858,7 +2020,7 @@ PanelWindow {
     signal moved(real v)
 
     width: 30
-    height: 112
+    height: 168
     opacity: enabled ? 1 : 0.45
 
     readonly property real capH: 14
@@ -1993,6 +2155,64 @@ PanelWindow {
     ToolTip.visible: hover.containsMouse && toggle.tip !== ""
     ToolTip.text: toggle.tip
     ToolTip.delay: 450
+  }
+
+  // A song row: title, artist · album, duration; click plays its album from
+  // that song; hover buttons play and add to a playlist.
+  component TrackRow: Rectangle {
+    id: trow
+    property var track: null
+    radius: 7
+    readonly property bool isCurrent: root.service && root.service.playing && track
+      && root.service.trackTitle === track.title && root.service.trackArtist === track.artist
+    color: tH.hovered ? root.dim(0.08) : (isCurrent ? root.acc(0.12) : "transparent")
+    HoverHandler { id: tH }
+    MouseArea {
+      anchors.fill: parent
+      onClicked: if (root.service && trow.track) root.service.playAlbum(trow.track.albumKey, trow.track.key)
+    }
+    Column {
+      anchors.left: parent.left; anchors.leftMargin: 10
+      anchors.right: tDur.left; anchors.rightMargin: 8
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: 1
+      Text {
+        width: parent.width
+        elide: Text.ElideRight
+        text: trow.track ? trow.track.title : ""
+        font.pixelSize: 12
+        font.bold: trow.isCurrent
+        color: trow.isCurrent ? Color.accent : Color.foreground
+      }
+      Text {
+        width: parent.width
+        elide: Text.ElideRight
+        text: trow.track ? [trow.track.artist, trow.track.album].filter(Boolean).join("  ·  ") : ""
+        font.pixelSize: 10
+        color: root.dim(0.5)
+      }
+    }
+    Text {
+      id: tDur
+      anchors.right: tActs.left; anchors.rightMargin: 8
+      anchors.verticalCenter: parent.verticalCenter
+      text: trow.track ? root.fmtMs(trow.track.duration) : ""
+      font.pixelSize: 10
+      color: root.dim(0.4)
+      visible: !tH.hovered
+    }
+    Row {
+      id: tActs
+      anchors.right: parent.right; anchors.rightMargin: 6
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: 2
+      width: tH.hovered ? implicitWidth : 0
+      clip: true
+      RowBtn { glyph: "󰐊"; tip: "Play from this song"; strong: true; visible: tH.hovered
+               onTapped: if (root.service && trow.track) root.service.playAlbum(trow.track.albumKey, trow.track.key) }
+      RowBtn { glyph: "󰐕"; tip: "Add to a playlist"; visible: tH.hovered
+               onTapped: if (root.service && trow.track) root.service.requestAdd([trow.track.key]) }
+    }
   }
 
   // A small round button for list rows.
