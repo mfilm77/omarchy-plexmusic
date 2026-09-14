@@ -54,6 +54,8 @@ actually reach for, a search box over everything else, and one click to play.
 
 - [Omarchy](https://omarchy.org/) (Quattro / shell plugins)
 - A Plex Media Server with a music library
+- `python3` — runs the `bin/plexmusic` helper (standard library only)
+- `xdg-open` — opens plex.tv/link in your browser when linking (part of `xdg-utils`)
 - `mpv` — the player
 - `mpv-mpris` — so the rest of the desktop sees what is playing (optional)
 - `cava` — the spectrum analyser (optional; without it the band says "idle")
@@ -129,7 +131,8 @@ lists them all with round-trip times.
   `0600`, on the machine you linked. It is never sent anywhere but your own
   Plex server.
 - `plexmusic link forget` deletes the token, the server settings and the cached
-  index.
+  index. It keeps your starred artists (`favourites.json`, which holds no
+  token) and the cover cache, so relinking brings your list straight back.
 - Nothing credential-shaped is in this repository, and the files that hold a
   token are in `.gitignore`.
 
