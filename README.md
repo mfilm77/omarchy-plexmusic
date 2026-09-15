@@ -11,6 +11,12 @@ nothing via the cloud.
 
 ![Plex Music](preview.png)
 
+| Stations | Search |
+| --- | --- |
+| ![Stations: radio built from your own library](docs/preview-2.png) | ![Search across artists and song titles](docs/preview-3.png) |
+
+In the bar: ![The bar widget with its live meter](docs/bar.png)
+
 ## What is in the panel
 
 - **Starred** — the artists you keep. Star any artist to add them.
