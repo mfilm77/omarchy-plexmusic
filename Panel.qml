@@ -62,6 +62,17 @@ PanelWindow {
     dismiss()
   }
 
+  // Tap the now-playing line (or Ctrl+G): the right-hand side jumps to the
+  // album that is playing, with its artist behind it for Back. A live search
+  // would hide that view, so it is cleared first; the playing track gets the
+  // highlight once the album's tracks have loaded.
+  function goToPlaying() {
+    if (!service || !service.canRevealPlaying) return
+    if (searchField.text !== "") searchField.text = ""
+    if (service.revealPlaying()) side.revealOnLoad = true
+    searchField.forceActiveFocus()
+  }
+
   visible: false
   anchors { top: true; bottom: true; left: true; right: true }
   color: "transparent"
@@ -344,19 +355,29 @@ PanelWindow {
           anchors.bottomMargin: 14
           spacing: 8
 
+          // The title and the artist · album line are one tap target: they
+          // open the playing album. Sized to their text, so only the words
+          // react; on hover they take the accent and an underline.
           Text {
-            width: parent.width
+            id: nowTitle
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(parent.width, implicitWidth)
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight
             text: root.service && root.service.playing
               ? (root.service.trackTitle || "—") : "Nothing playing"
             font.pixelSize: 14
             font.bold: true
-            color: Color.foreground
+            font.underline: nowTitleHover.hovered && nowTarget.enabled
+            color: nowTitleHover.hovered && nowTarget.enabled ? Color.accent : Color.foreground
+            HoverHandler { id: nowTitleHover; enabled: nowTarget.enabled; cursorShape: Qt.PointingHandCursor }
+            TapHandler { enabled: nowTarget.enabled; onTapped: root.goToPlaying() }
           }
 
           Text {
-            width: parent.width
+            id: nowLine
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(parent.width, implicitWidth)
             horizontalAlignment: Text.AlignHCenter
             elide: Text.ElideRight
             visible: root.service && root.service.playing
@@ -364,7 +385,20 @@ PanelWindow {
               ? [root.service.trackArtist, root.service.trackAlbum].filter(Boolean).join("  ·  ")
               : ""
             font.pixelSize: 11
-            color: root.dim(0.55)
+            font.underline: nowLineHover.hovered && nowTarget.enabled
+            color: nowLineHover.hovered && nowTarget.enabled ? Color.accent : root.dim(0.55)
+            HoverHandler { id: nowLineHover; enabled: nowTarget.enabled; cursorShape: Qt.PointingHandCursor }
+            TapHandler { enabled: nowTarget.enabled; onTapped: root.goToPlaying() }
+
+            ToolTip.visible: (nowTitleHover.hovered || nowLineHover.hovered) && nowTarget.enabled
+            ToolTip.text: "Show this album (Ctrl+G)"
+            ToolTip.delay: 500
+          }
+
+          // Whether the now-playing line leads anywhere right now.
+          QtObject {
+            id: nowTarget
+            readonly property bool enabled: root.service ? root.service.canRevealPlaying : false
           }
 
           Item {
@@ -508,6 +542,8 @@ PanelWindow {
         readonly property bool inSongs: view === "songs" && !searchingNow
 
         readonly property bool inSettings: view === "settings"
+        // Set by goToPlaying(): highlight the playing track once its album loads.
+        property bool revealOnLoad: false
 
         Rectangle {
           id: searchBox
@@ -579,6 +615,9 @@ PanelWindow {
                 root.closeStep(); event.accepted = true; break
               case Qt.Key_L:
                 if (event.modifiers & Qt.ControlModifier) { root.service.setLoop(!root.service.loop); event.accepted = true }
+                break
+              case Qt.Key_G:
+                if (event.modifiers & Qt.ControlModifier) { root.goToPlaying(); event.accepted = true }
                 break
               case Qt.Key_1: case Qt.Key_2: case Qt.Key_3: case Qt.Key_4: case Qt.Key_5:
                 if (event.modifiers & Qt.ControlModifier) {
@@ -1262,6 +1301,11 @@ PanelWindow {
           boundsBehavior: Flickable.StopAtBounds
           model: root.service ? root.service.tracks : []
           ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          onCountChanged: if (side.revealOnLoad && count > 0) {
+            side.revealOnLoad = false
+            Qt.callLater(side.revealCurrent)
+          }
 
           readonly property bool isPlaylist: root.service && root.service.selectedPlaylist !== null
           readonly property var head: root.service

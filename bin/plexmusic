@@ -459,6 +459,10 @@ class Plex:
                 # fallback — 94% of albums here have a cover, 83% of artists do.
                 "albumKey": str(m.get("parentRatingKey") or ""),
                 "albumThumb": m.get("parentThumb") or m.get("grandparentThumb") or "",
+                # So the panel can open the playing track's album and artist
+                # by key, never by searching for a name.
+                "artistKey": str(m.get("grandparentRatingKey") or ""),
+                "albumYear": int(m.get("parentYear") or 0),
             })
         return tracks
 
@@ -1225,27 +1229,31 @@ def cmd_cmd(args) -> None:
     emit({"action": action})
 
 
+def current_entry(queue: dict, path: str, pos) -> dict:
+    """The queue entry mpv is playing, or {} when it cannot be told.
+
+    Matched by the track's part key inside mpv's current path, which holds
+    whether or not --shuffle reordered mpv's playlist. Only an unshuffled
+    queue may fall back to the playlist position.
+    """
+    tracks = queue.get("tracks", []) or []
+    if path:
+        for track in tracks:
+            if track.get("part") and track["part"] in path:
+                return track
+    if isinstance(pos, int) and not isinstance(pos, bool) and 0 <= pos < len(tracks) \
+            and not queue.get("shuffle"):
+        return tracks[pos]
+    return {}
+
+
 def cmd_now(args) -> None:
     if not mpv_running():
         emit({"playing": False})
         return
     pos = mpv_get("playlist-pos")
     queue = read_json(QUEUE_FILE, {})
-    tracks = queue.get("tracks", [])
-
-    # Match mpv's current path back to our queue by part key. This works
-    # whether or not --shuffle has reordered mpv's playlist, which indexing
-    # by playlist-pos does not.
-    path = mpv_get("path") or ""
-    entry: dict = {}
-    if path:
-        for track in tracks:
-            if track.get("part") and track["part"] in path:
-                entry = track
-                break
-    if not entry and isinstance(pos, int) and 0 <= pos < len(tracks) \
-            and not queue.get("shuffle"):
-        entry = tracks[pos]
+    entry = current_entry(queue, mpv_get("path") or "", pos)
 
     # File tags are the truth for what is sounding; the queue fills the gaps
     # left by untagged rips.
@@ -1282,6 +1290,10 @@ def cmd_now(args) -> None:
         "loop": mpv_get("loop-playlist") in ("inf", "force", True),
         "key": entry.get("key") or "",
         "albumKey": entry.get("albumKey") or "",
+        # Queues written before these fields existed simply leave them empty;
+        # the panel then falls back to the artist, or does nothing.
+        "artistKey": entry.get("artistKey") or "",
+        "albumYear": entry.get("albumYear") or 0,
     })
 
 

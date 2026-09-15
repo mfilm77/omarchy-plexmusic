@@ -32,6 +32,9 @@ In the bar: ![The bar widget with its live meter](docs/bar.png)
   library was scanned after the index was built — no manual rescan needed.
 - Open an artist for their **albums** (covers, years), an album for its
   **tracks**. Every row has play; clicking a track plays the album from there.
+- Click the **now-playing line** under the record (title, or artist · album) to jump
+  to that album, whatever you were browsing — handy after playing a single song or a
+  station. With no album known it opens the artist instead.
 - The **+** on a track, an album, or "Add all" opens *Add to playlist*: pick an
   existing playlist or type a name to start a new one. The plugin only ever
   adds — it never removes tracks or deletes playlists.
@@ -47,6 +50,7 @@ Keyboard, with the cursor in the search box the whole time:
 | ← / Backspace (empty box) | back |
 | Ctrl+P | add the highlighted track or album to a playlist |
 | Ctrl+L | repeat on/off — start again when the album, playlist or queue ends |
+| Ctrl+G | go to what is playing: its album opens on the right (same as clicking the now-playing line) |
 | Ctrl+1 … Ctrl+5 | Starred · All artists · Songs · Playlists · Stations |
 | Esc | close the popup, clear the search, go back, then close the panel |
 

@@ -105,6 +105,8 @@ Item {
   property string artPath: ""
   property string trackKey: ""           // Plex key of the playing track
   property string trackAlbumKey: ""
+  property string trackArtistKey: ""
+  property int trackAlbumYear: 0
   property real position: 0
   property real duration: 0
   property int queuePos: 0
@@ -291,6 +293,7 @@ Item {
         root.playing = !!d.playing
         if (!d.playing) {
           root.trackKey = ""; root.trackAlbumKey = ""
+          root.trackArtistKey = ""; root.trackAlbumYear = 0
           root.trackTitle = ""; root.trackArtist = ""; root.trackAlbum = ""
           root.artPath = ""; root.position = 0; root.duration = 0
           root.queuePos = 0; root.queueCount = 0
@@ -303,6 +306,8 @@ Item {
         root.artPath = d.art || ""
         root.trackKey = d.key ? String(d.key) : ""
         root.trackAlbumKey = d.albumKey ? String(d.albumKey) : ""
+        root.trackArtistKey = d.artistKey ? String(d.artistKey) : ""
+        root.trackAlbumYear = d.albumYear || 0
         root.position = d.position || 0
         root.duration = d.duration || 0
         root.queuePos = (d.playlistPos || 0) + 1
@@ -580,6 +585,42 @@ Item {
     root.loadingTracks = true
     tracksProc.command = [root.helper, "tracks", "--album", String(al.key)]
     tracksProc.running = true
+  }
+
+  // Whether the now-playing line can take you somewhere.
+  readonly property bool canRevealPlaying: playing && (trackAlbumKey !== "" || trackArtistKey !== "")
+
+  // Open what is playing: its album, with its artist behind it so Back lands
+  // on the artist's albums. Everything goes by the Plex keys the helper
+  // reported for the playing track, never by searching for a name. With no
+  // album key (an old queue) it falls back to the artist; with neither it
+  // says so and stays where it is. Returns whether it navigated.
+  function revealPlaying() {
+    if (!root.playing) return false
+    if (root.trackAlbumKey !== "") {
+      if (root.trackArtistKey !== "") {
+        root.selectedArtist = { key: root.trackArtistKey, title: root.trackArtist }
+        root.albums = []
+        root.loadingAlbums = true
+        albumsProc.command = [root.helper, "albums", "--artist", root.trackArtistKey]
+        albumsProc.running = true
+      } else {
+        root.selectedArtist = null
+      }
+      root.openAlbum({
+        key: root.trackAlbumKey,
+        title: root.trackAlbum,
+        year: root.trackAlbumYear,
+        artUrl: root.artPath !== "" ? "file://" + root.artPath : ""
+      })
+      return true
+    }
+    if (root.trackArtistKey !== "") {
+      root.openArtist({ key: root.trackArtistKey, title: root.trackArtist })
+      return true
+    }
+    root.showToast("Plex did not say which album this track is from")
+    return false
   }
 
   function openPlaylist(p) {
