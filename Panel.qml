@@ -2512,11 +2512,14 @@ PanelWindow {
     ToolTip.delay: 500
   }
 
-  // Album or playlist artwork, square with rounded corners, straight from Plex.
+  // Album or playlist artwork, square with rounded corners, from the helper's
+  // cover cache. Only local files are loaded: a failed network load writes its
+  // full URL to the journal, and a Plex URL would carry the token with it.
   component CoverThumb: Rectangle {
     id: ct
     property int size: 40
     property string source: ""
+    readonly property string localSource: /^file:\/\//.test(source) ? source : ""
     property string fallbackGlyph: "󰃽"
     width: size
     height: size
@@ -2526,7 +2529,7 @@ PanelWindow {
 
     Image {
       anchors.fill: parent
-      source: ct.source
+      source: ct.localSource
       fillMode: Image.PreserveAspectCrop
       asynchronous: true
       cache: true
@@ -2540,7 +2543,7 @@ PanelWindow {
       text: ct.fallbackGlyph
       font.pixelSize: ct.size * 0.45
       color: root.dim(0.3)
-      visible: ct.source === ""
+      visible: ct.localSource === ""
     }
   }
 

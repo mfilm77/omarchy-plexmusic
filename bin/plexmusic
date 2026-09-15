@@ -16,6 +16,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -95,6 +96,26 @@ def fold(text: str) -> str:
         c for c in stripped
         if not unicodedata.combining(c) and unicodedata.category(c) != "Cf")
     return stripped.casefold()
+
+
+def art_cache_path(thumb: str, size: int) -> str:
+    """Where a Plex thumb is cached at a given size.
+
+    Plex thumb paths end in a version number, so the cache key changes when
+    the artwork changes and stale covers cannot stick around. Anything that is
+    not a plain filename character is flattened, so a thumb can never name a
+    file outside the cache directory.
+    """
+    slug = thumb.strip("/").replace("/", "_")
+    slug = "".join(c if c.isalnum() or c in "._-" else "_" for c in slug)
+    return os.path.join(ART_DIR, f"{slug.lstrip('.') or 'art'}_{size}.jpg")
+
+
+def art_file_url(path: str | None) -> str:
+    """A file:// URL for QML's Image, or "" when there is no cover."""
+    if not path:
+        return ""
+    return "file://" + urllib.parse.quote(os.path.abspath(path))
 
 
 # --------------------------------------------------------------------------- #
@@ -304,20 +325,31 @@ class Plex:
             write_json(SETTINGS_FILE, self.settings)
         return mid
 
-    def art_url(self, thumb: str, size: int = 160) -> str:
-        """A direct, resized artwork URL for the panel's Image items.
-
-        Stays on this machine: the token is in the URL, and the URL only ever
-        goes from the helper's stdout into the shell's own image loader.
+    def attach_art(self, items: list[dict], size: int,
+                   thumb_field: str = "thumb") -> None:
+        """Give every item an `artUrl` that is a local file:// URL, never a
+        Plex URL. The token must not reach QML: a failed network image load
+        prints its whole URL into the user journal. Covers are fetched into
+        the cache here, a few at a time; one that cannot be fetched gets ""
+        and the panel shows its glyph instead.
         """
-        if not thumb:
-            return ""
-        base = self.base or self.resolve_base()
-        query = urllib.parse.urlencode({
-            "width": size, "height": size, "minSize": 1, "upscale": 1,
-            "url": thumb, "X-Plex-Token": self.token,
-        })
-        return f"{base}/photo/:/transcode?{query}"
+        wanted = {it.get(thumb_field) or "" for it in items} - {""}
+        found: dict[str, str | None] = {}
+        misses = []
+        for thumb in wanted:
+            path = art_cache_path(thumb, size)
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                found[thumb] = path
+            else:
+                misses.append(thumb)
+        if misses:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                for thumb, path in zip(misses, pool.map(
+                        lambda t: self.art_path(t, size=size), misses)):
+                    found[thumb] = path
+        for it in items:
+            it["artUrl"] = art_file_url(found.get(it.get(thumb_field) or ""))
 
     def artist_albums(self, rating_key: str) -> list[dict]:
         data = self.get(f"/library/metadata/{rating_key}/children")
@@ -334,10 +366,10 @@ class Plex:
                 # per-album metadata has it and is one small request each.
                 "tracks": m.get("leafCount") or m.get("childCount") or self.album_track_count(str(m.get("ratingKey"))),
                 "thumb": thumb,
-                "artUrl": self.art_url(thumb),
             })
         # Newest first, as a discography is usually read.
         albums.sort(key=lambda a: (-(a["year"] or 0), a["title"].lower()))
+        self.attach_art(albums, 160)
         return albums
 
     def album_track_count(self, album_key: str) -> int:
@@ -361,9 +393,9 @@ class Plex:
                 "tracks": m.get("leafCount") or 0,
                 "duration": int(m.get("duration") or 0),
                 "thumb": m.get("composite") or "",
-                "artUrl": self.art_url(m.get("composite") or ""),
             })
         out.sort(key=lambda p: p["title"].lower())
+        self.attach_art(out, 160)
         return out
 
     def playlist_create(self, title: str, track_keys: list[str]) -> dict:
@@ -487,31 +519,35 @@ class Plex:
         """Cache a Plex thumb locally and return its path. None if no art."""
         if not thumb:
             return None
-        # Plex thumb paths end in a version number, so the cache key changes
-        # when the artwork changes and stale covers cannot stick around.
-        slug = thumb.strip("/").replace("/", "_")
-        target = os.path.join(ART_DIR, f"{slug}_{size}.jpg")
+        target = art_cache_path(thumb, size)
         if os.path.exists(target) and os.path.getsize(target) > 0:
             return target
         base = self.base or self.resolve_base()
+        # The token travels in the request header only, so this URL holds
+        # nothing secret even if an exception or a log line ever shows it.
         query = urllib.parse.urlencode({
             "width": size, "height": size, "minSize": 1, "upscale": 1,
-            "url": thumb, "X-Plex-Token": self.token,
+            "url": thumb,
         })
         url = f"{base}/photo/:/transcode?{query}"
-        os.makedirs(ART_DIR, exist_ok=True)
+        os.makedirs(ART_DIR, mode=0o700, exist_ok=True)
+        tmp = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             req = urllib.request.Request(url, headers=self.headers())
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = resp.read()
             if not data:
                 return None
-            tmp = target + ".tmp"
-            with open(tmp, "wb") as fh:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
             os.replace(tmp, target)
             return target
         except Exception:
+            try:
+                os.unlink(tmp)       # our own half-written temp file, never a cover
+            except OSError:
+                pass
             return None
 
 
@@ -942,7 +978,7 @@ def cmd_tracks(args) -> None:
         die("tracks needs --album, --playlist or --artist")
     for t in tracks:
         t.pop("part", None)          # the token-bearing bit stays out of the UI
-        t["artUrl"] = plex.art_url(t.get("albumThumb", ""), 96)
+    plex.attach_art(tracks, 96, thumb_field="albumThumb")
     emit({"tracks": tracks, "source": source})
 
 
@@ -1077,9 +1113,10 @@ def cmd_decades(args) -> None:
             thumb = m.get("thumb") or m.get("parentThumb") or ""
             albums.append({"key": str(m.get("ratingKey")), "title": m.get("title") or "",
                            "artist": m.get("parentTitle") or "", "year": m.get("year") or 0,
-                           "artUrl": plex.art_url(thumb, 200)})
+                           "thumb": thumb})
         if albums:
             rows.append({"decade": d, "label": f"{str(d)[2:]}s", "albums": albums})
+    plex.attach_art([a for r in rows for a in r["albums"]], 200)
     emit({"rows": rows})
 
 
@@ -1218,8 +1255,7 @@ def cmd_now(args) -> None:
     art = None
     thumb = entry.get("albumThumb") or ""
     if thumb:
-        slug = thumb.strip("/").replace("/", "_")
-        cached = os.path.join(ART_DIR, f"{slug}_500.jpg")
+        cached = art_cache_path(thumb, 500)
         if os.path.exists(cached):
             art = cached
         elif not args.no_fetch:

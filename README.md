@@ -190,8 +190,10 @@ changing the replaygain mode.
   twenty years; it is a no-op on files with no tags.
 - **The current track** is found by matching mpv's path back to the queue, not
   by playlist index, so it stays correct when shuffle reorders things.
-- **Covers** come from Plex's own photo transcoder at 500 px and are cached in
-  `~/.cache/omarchy-plex-music/art`. The cache key includes Plex's artwork
+- **Covers** come from Plex's own photo transcoder (500 px on the turntable,
+  smaller in the lists) and are cached in `~/.cache/omarchy-plex-music/art`,
+  owner-only. The panel only ever loads covers from that cache, so no URL
+  carrying your token reaches the shell or its log. The cache key includes Plex's artwork
   version, so replacing a cover in Plex does not leave a stale one here.
 - **The record** turns at 33⅓ rpm — 1.8 s a revolution. Pausing stops it where
   it is. The tonearm's pivot and length are solved so the stylus lands on the
