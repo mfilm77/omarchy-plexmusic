@@ -11,6 +11,10 @@ Item {
   id: root
 
   property bool spinning: false
+  // False while the panel is hidden. The record turns only when it is both
+  // playing and on screen, and picks up again on every show.
+  property bool shown: true
+  onShownChanged: if (shown && spinning) spin.restart()
   property string art: ""
   property real labelRatio: 0.29      // label diameter as a share of the disc
 
@@ -238,13 +242,21 @@ Item {
         border.color: Qt.rgba(0, 0, 0, 0.6)
       }
 
-      RotationAnimator {
+      // A NumberAnimation, not a RotationAnimator. An Animator runs on the
+      // render thread, and hiding the panel's window tears its job down while
+      // `running` stays true — the panel is kept loaded and only hidden, so on
+      // the next show the binding never changes and the record sat still with
+      // the music playing. This one runs on the GUI thread, stops whenever the
+      // panel is hidden, and starts again the moment it is shown.
+      NumberAnimation {
+        id: spin
         target: turning
+        property: "rotation"
         from: 0
         to: 360
         duration: 1800          // 33 1/3 rpm
         loops: Animation.Infinite
-        running: root.spinning
+        running: root.spinning && root.shown
       }
     }
 

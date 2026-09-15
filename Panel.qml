@@ -308,6 +308,9 @@ PanelWindow {
           width: Math.max(0, Math.min(parent.width - 20, parent.height - 185))
           height: width
           spinning: root.service ? (root.service.playing && !root.service.paused) : false
+          // The panel window is hidden rather than destroyed, so the record
+          // needs to know when it is on screen to start turning again.
+          shown: root.visible
           // Paused or stopped, the arm goes back to its rest, off the record.
           engaged: root.service ? (root.service.playing && !root.service.paused) : false
           volume: root.service ? root.service.volume : 100
