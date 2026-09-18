@@ -49,7 +49,7 @@ IPC_SOCKET = os.path.join(RUNTIME_DIR, "omarchy-plexmusic.sock")
 
 PLEX_TV = "https://plex.tv"
 PLEX_PRODUCT = "Omarchy Plex Music"
-PLEX_VERSION = "0.1.0"
+PLEX_VERSION = "0.2.0"
 PLEX_PLATFORM = "Linux"
 
 # --------------------------------------------------------------------------- #

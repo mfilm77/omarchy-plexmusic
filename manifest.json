@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.mfilm77.plexmusic",
   "name": "Plex Music",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "mfilm",
   "license": "MIT",
   "description": "Play your own Plex music library from the bar: a turntable with the real album cover on the label, a full-width spectrum analyser in your theme's colours, starred artists, the whole library A-Z, albums and tracks, and your Plex playlists (add to one or start a new one). Keyboard-driven, with a live meter in the bar. Direct play through mpv — no transcode, no Plex Pass, no cloud. Works on the LAN or over a VPN such as Tailscale.",

@@ -236,6 +236,17 @@ changing the replaygain mode.
   `viewCount` for every artist, which makes "most played" meaningless. The
   starred list is curated by you for that reason.
 
+## Changes
+
+[CHANGELOG.md](CHANGELOG.md). The short version of 0.2.0: a first run that
+linked the account before adding the server used to end with an empty library
+and no explanation, and a rescan of a large library gave no sign it was
+running — both fixed, with the reason always shown now. It also carries the two
+fixes from the marketplace security review (safe, no-follow, atomic writes for
+everything including the token file, and a byte cap on every reply from the
+server), the tap-to-open-the-playing-album addition, and the fix for the record
+that stopped turning while the music played.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
