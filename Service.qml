@@ -180,6 +180,10 @@ Item {
   readonly property int maxIndexItems: 250000
   readonly property int maxFieldChars: 512
   readonly property int maxIndexBytes: 96 * 1024 * 1024
+  // A progress record is a handful of numbers and one short word. Anything
+  // bigger than this is not a progress record, whatever it claims to be.
+  readonly property int maxProgressBytes: 4096
+  readonly property int maxStageChars: 32
   // Set when an index was refused, so the panel can say why instead of
   // silently showing an empty library.
   property string indexError: ""
@@ -278,6 +282,10 @@ Item {
   // Re-read both index files from scratch. Re-assigning `path` re-runs the
   // load AND attaches the watcher, which a bare reload() on a FileView that
   // never managed to load does not.
+  // Note this replaces the declarative `path:` binding with a static value.
+  // That is deliberate and safe here — indexPath is derived from $HOME and
+  // never changes — but anything that later makes those paths dynamic has to
+  // revisit this.
   function reloadIndexFiles() {
     indexFile.path = ""
     indexFile.path = root.indexPath
@@ -521,6 +529,13 @@ Item {
     command: [root.helper, "progress"]
     stdout: StdioCollector {
       onStreamFinished: {
+        // The helper bounds this record, but the shell bounds it again: this
+        // is the one thing a running scan tells the panel, and it is read
+        // straight into properties of a process that never restarts.
+        if (String(text || "").length > root.maxProgressBytes) {
+          console.warn("plexmusic: refusing an oversized progress record")
+          return
+        }
         var d = root.parse(text)
         if (!d || d.ok === false) return
         // A scan started by something else — most often one that survived a
@@ -536,7 +551,7 @@ Item {
         root.indexArtists = d.artists || 0
         root.indexTracks = d.tracks || 0
         root.indexTrackTotal = d.trackTotal || 0
-        root.indexStage = d.stage || ""
+        root.indexStage = String(d.stage || "").substring(0, root.maxStageChars)
         root.indexElapsed = d.elapsed || 0
       }
     }

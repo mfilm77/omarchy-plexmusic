@@ -17,6 +17,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
@@ -54,6 +55,10 @@ class ProgressFileTests(unittest.TestCase):
         self.pm.ARTISTS_FILE = os.path.join(data, "artists.json")
         self.pm.TRACKS_FILE = os.path.join(data, "tracks.json")
         self.pm.PROGRESS_FILE = os.path.join(data, "index-progress.json")
+        # The index lock is a real flock held for the life of the process, so
+        # every test needs its own or they lock each other out.
+        self.pm.LOCK_FILE = os.path.join(data, "index.lock")
+        self.addCleanup(self.release_lock)
         self.pm.CONFIG_DIR = cfg
         self.pm.AUTH_FILE = os.path.join(cfg, "auth.json")
         self.pm.SETTINGS_FILE = os.path.join(cfg, "settings.json")
@@ -64,6 +69,17 @@ class ProgressFileTests(unittest.TestCase):
                            {"baseUrl": "http://plex.example:32400",
                             "musicSection": "31"})
         self.seen = []
+
+    def release_lock(self):
+        """Drop the flock this test's cmd_index took; a real run drops it by
+        exiting."""
+        fd = getattr(self.pm, "_index_lock_fd", None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            self.pm._index_lock_fd = None
 
     def run_index(self, artist_pages=1, track_pages=2):
         """Run cmd_index against a fake server, recording every progress file
@@ -185,10 +201,19 @@ class ProgressFileTests(unittest.TestCase):
         self.addCleanup(child.kill)
         return child.pid
 
-    def test_our_own_live_pid_counts_as_running(self):
+    def hold_the_lock(self):
+        """Take the index lock the way a running indexer holds it."""
+        import fcntl
+        os.makedirs(os.path.dirname(self.pm.LOCK_FILE), 0o700, exist_ok=True)
+        fd = os.open(self.pm.LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(os.close, fd)
+        return fd
+
+    def test_a_held_lock_reads_as_a_running_scan(self):
+        self.hold_the_lock()
         self.pm.write_json(self.pm.PROGRESS_FILE,
-                           {"stage": "tracks", "pid": self.live_indexer_pid(),
-                            "startedAt": 1, "tracks": 5})
+                           {"stage": "tracks", "startedAt": 1, "tracks": 5})
         out = io.StringIO()
         with redirect_stdout(out):
             self.pm.cmd_progress(None)
@@ -198,15 +223,68 @@ class ProgressFileTests(unittest.TestCase):
 
     def test_a_second_indexer_is_refused(self):
         """Two scans would fight over the same files for no benefit."""
-        self.pm.write_json(self.pm.PROGRESS_FILE,
-                           {"stage": "tracks", "pid": self.live_indexer_pid(),
-                            "startedAt": 1})
+        self.hold_the_lock()
         out = io.StringIO()
         with redirect_stdout(out):
             with self.assertRaises(SystemExit) as caught:
                 self.pm.cmd_index(None)
         self.assertEqual(caught.exception.code, 5)
         self.assertIn("already running", json.loads(out.getvalue())["error"])
+
+    def test_two_starters_racing_cannot_both_index(self):
+        """The case the old check-then-act guard let through: both read the
+        progress file before either had written one, so both proceeded."""
+        self.assertFalse(os.path.exists(self.pm.PROGRESS_FILE))
+        other = load_helper()
+        other.DATA_DIR = self.pm.DATA_DIR
+        other.LOCK_FILE = self.pm.LOCK_FILE
+        other.PROGRESS_FILE = self.pm.PROGRESS_FILE
+        self.assertTrue(other.take_index_lock(), "the first starter must win")
+        self.addCleanup(self.release_other, other)
+        # Nothing has been published yet — the old guard had nothing to see.
+        self.assertFalse(os.path.exists(self.pm.PROGRESS_FILE))
+        self.assertFalse(self.pm.take_index_lock(), "the second one got in too")
+
+    def release_other(self, other):
+        fd = getattr(other, "_index_lock_fd", None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def test_a_killed_indexer_leaves_no_stale_lock(self):
+        """The kernel drops an flock when its holder dies, so there is no
+        stale-lock heuristic that could take one from a live indexer."""
+        import subprocess
+        os.makedirs(os.path.dirname(self.pm.LOCK_FILE), 0o700, exist_ok=True)
+        holder = subprocess.Popen(
+            ["python3", "-c",
+             "import fcntl,os,sys,time;"
+             "fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o600);"
+             "fcntl.flock(fd, fcntl.LOCK_EX);"
+             "print('held', flush=True); time.sleep(60)",
+             self.pm.LOCK_FILE],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        self.assertFalse(self.pm.take_index_lock(), "a live holder was ignored")
+        holder.kill()
+        holder.wait()
+        self.assertTrue(self.pm.take_index_lock(),
+                        "the dead holder's lock was never released")
+
+    def test_the_pid_fallback_still_works_without_locking(self):
+        """On a filesystem that cannot lock, the recorded pid is the fallback."""
+        self.pm.write_json(self.pm.PROGRESS_FILE,
+                           {"stage": "tracks", "pid": self.live_indexer_pid(),
+                            "startedAt": 1, "tracks": 5})
+        out = io.StringIO()
+        with mock.patch.object(self.pm, "lock_is_held", lambda: None):
+            with redirect_stdout(out):
+                self.pm.cmd_progress(None)
+        self.assertTrue(json.loads(out.getvalue())["running"])
 
     def test_a_failed_progress_write_never_fails_the_scan(self):
         """Progress is a nicety. Losing it must not lose the index."""
@@ -221,6 +299,206 @@ class ProgressFileTests(unittest.TestCase):
             d = self.run_index()
         self.assertTrue(d["ok"])
         self.assertGreater(d["artistCount"], 0)
+
+
+class BoundedProgressTests(unittest.TestCase):
+    """SEC-4: cap what is published. The progress record is the one thing a
+    running scan tells the shell, and it goes straight into shell properties."""
+
+    def setUp(self):
+        self.pm = load_helper()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        data = os.path.join(self.tmp.name, "data")
+        self.pm.DATA_DIR = data
+        self.pm.PROGRESS_FILE = os.path.join(data, "index-progress.json")
+        self.pm.LOCK_FILE = os.path.join(data, "index.lock")
+        self.pm.CACHE_DIR = os.path.join(self.tmp.name, "cache")
+        self.pm.LOG_FILE = os.path.join(self.pm.CACHE_DIR, "plexmusic.log")
+
+    def test_the_stage_is_clamped_on_the_way_in(self):
+        """The hole William proved: 200,000 characters reached the shell."""
+        self.pm.write_json(self.pm.PROGRESS_FILE,
+                           {"stage": "x" * 200000, "pid": 1, "startedAt": 1})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.pm.cmd_progress(None)
+        stage = json.loads(out.getvalue())["stage"]
+        self.assertEqual(len(stage), self.pm.MAX_STAGE_CHARS)
+
+    def test_every_published_field_is_a_bounded_number_or_a_short_word(self):
+        out = self.pm.bounded_progress(
+            {"stage": "t" * 500, "artists": "12", "tracks": None,
+             "trackTotal": "junk", "startedAt": 5, "pid": 7,
+             "somethingElse": "x" * 1000})
+        self.assertEqual(len(out["stage"]), self.pm.MAX_STAGE_CHARS)
+        self.assertEqual(out["artists"], 12)
+        self.assertEqual(out["tracks"], 0)
+        self.assertEqual(out["trackTotal"], 0)
+        self.assertNotIn("somethingElse", out,
+                         "only known fields may be published")
+
+    def test_the_file_a_scan_writes_is_bounded_too(self):
+        """Bounded on the way out as well as on the way back in."""
+        src = open(HELPER).read()
+        self.assertIn("write_json(PROGRESS_FILE, bounded_progress(state)", src)
+
+    def test_the_shell_refuses_an_oversized_progress_record(self):
+        with open(os.path.join(REPO, "Service.qml"), encoding="utf-8") as fh:
+            qml = fh.read()
+        self.assertIn("maxProgressBytes", qml)
+        chunk = qml[qml.index("id: progressProc"):]
+        chunk = chunk[:chunk.index("id: progressTimer")]
+        self.assertIn("> root.maxProgressBytes", chunk)
+        self.assertIn("root.maxStageChars", chunk)
+
+
+class QuietFailureTests(unittest.TestCase):
+    """`now` is polled twice a second while music plays. One call, one object."""
+
+    def setUp(self):
+        self.pm = load_helper()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.pm.CACHE_DIR = os.path.join(self.tmp.name, "cache")
+        self.pm.LOG_FILE = os.path.join(self.pm.CACHE_DIR, "plexmusic.log")
+
+    def test_a_handled_failure_prints_nothing(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            with self.pm.quiet():
+                with self.assertRaises(self.pm.PlexUnavailable):
+                    self.pm.die("no Plex server reachable", code=3)
+        self.assertEqual(out.getvalue(), "",
+                         "a caught die() still answered on stdout")
+
+    def test_an_unhandled_failure_still_answers_normally(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                self.pm.die("no Plex server reachable", code=3)
+        self.assertEqual(json.loads(out.getvalue())["error"],
+                         "no Plex server reachable")
+
+    def test_quiet_nests_and_restores(self):
+        with self.pm.quiet():
+            with self.pm.quiet():
+                pass
+            with self.assertRaises(self.pm.PlexUnavailable):
+                self.pm.die("inner")
+        with self.assertRaises(SystemExit):
+            with redirect_stdout(io.StringIO()):
+                self.pm.die("outer")
+
+    def test_the_artwork_call_chain_stays_silent_when_plex_is_gone(self):
+        """The real shape of the bug, exercised rather than asserted: the exact
+        sequence `now` runs for an uncached cover, with nothing reachable."""
+        self.pm.CONFIG_DIR = os.path.join(self.tmp.name, "config")
+        self.pm.AUTH_FILE = os.path.join(self.pm.CONFIG_DIR, "auth.json")
+        self.pm.SETTINGS_FILE = os.path.join(self.pm.CONFIG_DIR, "settings.json")
+        self.pm.write_json(self.pm.AUTH_FILE, {"auth" + "Token": "fake"})
+        self.pm.write_json(self.pm.SETTINGS_FILE,
+                           {"baseUrl": "http://127.0.0.1:1",
+                            "servers": ["http://127.0.0.1:1"]})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            try:
+                with self.pm.quiet():
+                    plex = self.pm.Plex()
+                    plex.resolve_base()
+                    plex.art_path("/library/metadata/1/thumb/1")
+                art_failed = False
+            except self.pm.PlexUnavailable:
+                art_failed = True
+        self.assertTrue(art_failed, "an unreachable server should be reported")
+        self.assertEqual(out.getvalue(), "",
+                         "the failure printed a second JSON object")
+
+    def test_the_old_swallowed_systemexit_is_gone(self):
+        src = open(HELPER).read()
+        self.assertIn("with quiet():", src)
+        self.assertNotIn("except SystemExit:", src)
+
+
+class LogDiscipline(unittest.TestCase):
+    """FA-3: the reason is in the log, once, in plain words."""
+
+    def setUp(self):
+        self.pm = load_helper()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.pm.CACHE_DIR = os.path.join(self.tmp.name, "cache")
+        self.pm.LOG_FILE = os.path.join(self.pm.CACHE_DIR, "plexmusic.log")
+
+    def lines(self):
+        with open(self.pm.LOG_FILE) as fh:
+            return [l for l in fh.read().splitlines() if l]
+
+    def test_a_repeating_failure_stays_one_line(self):
+        """A poll every 500 ms would otherwise write 200 identical lines and
+        evict the history the log exists to keep."""
+        self.pm.log_failure("a real earlier problem")
+        for _ in range(300):
+            self.pm.log_failure("now: no artwork (cannot reach Plex)")
+        lines = self.lines()
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("a real earlier problem", lines[0])
+        self.assertIn("no artwork", lines[1])
+
+    def test_a_repeat_is_rewritten_at_most_once_per_window(self):
+        self.pm.log_failure("same thing")
+        first = self.lines()[-1]
+        self.pm.log_failure("same thing")
+        self.assertEqual(self.lines()[-1], first, "it wrote again immediately")
+        # Age the stored line past the window and it may say so, once.
+        aged = time.strftime("%Y-%m-%d %H:%M:%S",
+                             time.localtime(time.time() - 600))
+        self.pm.atomic_write(self.pm.LOG_FILE,
+                             ("%s same thing\n" % aged).encode(), 0o600)
+        self.pm.log_failure("same thing")
+        self.assertEqual(len(self.lines()), 1)
+        self.assertIn(self.pm.REPEAT_SUFFIX.strip(), self.lines()[-1])
+
+    def test_a_different_failure_is_always_recorded(self):
+        self.pm.log_failure("problem one")
+        self.pm.log_failure("problem two")
+        self.assertEqual(len(self.lines()), 2)
+
+    def test_the_log_reader_does_not_follow_a_symlink(self):
+        os.makedirs(self.pm.CACHE_DIR, 0o700)
+        secret = os.path.join(self.tmp.name, "elsewhere.txt")
+        with open(secret, "w") as fh:
+            fh.write("PRIVATE CONTENT\n")
+        os.symlink(secret, self.pm.LOG_FILE)
+        self.pm.log_failure("a failure")
+        # The symlink is replaced by a real file; the target is untouched and
+        # none of it was copied into the log.
+        self.assertFalse(os.path.islink(self.pm.LOG_FILE))
+        with open(secret) as fh:
+            self.assertEqual(fh.read(), "PRIVATE CONTENT\n")
+        with open(self.pm.LOG_FILE) as fh:
+            body = fh.read()
+        self.assertNotIn("PRIVATE CONTENT", body)
+        self.assertIn("a failure", body)
+
+    def test_the_reader_takes_the_tail_not_the_whole_file(self):
+        os.makedirs(self.pm.CACHE_DIR, 0o700)
+        with open(self.pm.LOG_FILE, "w") as fh:
+            fh.write("x" * (self.pm.LOG_MAX_BYTES * 2))
+        os.chmod(self.pm.LOG_FILE, 0o600)
+        got = self.pm.read_tail_nofollow(self.pm.LOG_FILE,
+                                         self.pm.LOG_MAX_BYTES)
+        self.assertEqual(len(got), self.pm.LOG_MAX_BYTES)
+
+    def test_a_huge_log_is_trimmed_back_to_its_cap(self):
+        os.makedirs(self.pm.CACHE_DIR, 0o700)
+        with open(self.pm.LOG_FILE, "w") as fh:
+            for i in range(5000):
+                fh.write("2026-01-01 00:00:00 old line %d\n" % i)
+        os.chmod(self.pm.LOG_FILE, 0o600)
+        self.pm.log_failure("something new")
+        self.assertLessEqual(len(self.lines()), self.pm.LOG_LINES)
+        self.assertIn("something new", self.lines()[-1])
 
 
 class ShellReloadTests(unittest.TestCase):

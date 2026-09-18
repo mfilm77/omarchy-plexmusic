@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import json
 import os
 import re
@@ -43,6 +44,17 @@ CACHE_DIR = os.path.join(
 ART_DIR = os.path.join(CACHE_DIR, "art")
 LOG_FILE = os.path.join(CACHE_DIR, "plexmusic.log")
 LOG_LINES = 200
+# A line is trimmed to 1000 characters, so 200 of them cannot pass ~200 KB.
+# The reader takes the tail rather than the whole file, and never follows a
+# link to somewhere else.
+LOG_MAX_BYTES = 512 * 1024
+# How often the same failure may be written again. The now-playing poll runs
+# every 500 ms, so without this one unreachable server fills the whole log.
+LOG_REPEAT_SECONDS = 30
+# Held for as long as an index runs. The kernel drops it when the process ends,
+# however it ends, so a lock can never go stale and a live indexer can never
+# have its lock taken from under it.
+LOCK_FILE = os.path.join(DATA_DIR, "index.lock")
 # Where a running index says how far it has got, so the panel can show counts
 # going up instead of freezing for the minutes a big library takes.
 PROGRESS_FILE = os.path.join(DATA_DIR, "index-progress.json")
@@ -95,7 +107,39 @@ TOKEN_IN_TEXT = re.compile(r"X-Plex-Token=[^&\s\"']+")
 # small helpers
 # --------------------------------------------------------------------------- #
 
+class PlexUnavailable(Exception):
+    """A failure a caller has chosen to handle rather than report."""
+
+
+_quiet = False
+
+
+class quiet:
+    """Inside this block, die() raises instead of answering on stdout.
+
+    `now` is polled every 500 ms while music plays, and it fetches artwork
+    through code that calls die() when the server cannot be reached. die()
+    had already written its JSON line by the time the caller caught the
+    SystemExit, so the poll printed TWO objects, the panel's parse returned
+    null, and the now-playing display quietly stopped updating — while every
+    tick appended a log line. One command prints one object.
+    """
+
+    def __enter__(self):
+        global _quiet
+        self.was = _quiet
+        _quiet = True
+        return self
+
+    def __exit__(self, *exc):
+        global _quiet
+        _quiet = self.was
+        return False
+
+
 def die(message: str, code: int = 1) -> "NoReturn":  # type: ignore[name-defined]
+    if _quiet:
+        raise PlexUnavailable(message)
     log_failure(message)
     json.dump({"ok": False, "error": message}, sys.stdout)
     sys.stdout.write("\n")
@@ -103,6 +147,25 @@ def die(message: str, code: int = 1) -> "NoReturn":  # type: ignore[name-defined
 
 
 _logging = False
+
+TIMESTAMPED = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} ")
+REPEAT_SUFFIX = " (still happening)"
+
+
+def message_of(log_line: str) -> str:
+    """The message part of a stored log line, without stamp or repeat mark."""
+    body = log_line[20:] if TIMESTAMPED.match(log_line) else log_line
+    if body.endswith(REPEAT_SUFFIX):
+        body = body[:-len(REPEAT_SUFFIX)]
+    return body
+
+
+def stamp_of(log_line: str) -> float:
+    """When a stored log line was written, or 0 if it cannot be read."""
+    try:
+        return time.mktime(time.strptime(log_line[:19], "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def log_failure(message: str) -> None:
@@ -128,12 +191,23 @@ def log_failure(message: str) -> None:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         old = ""
         try:
-            with open(LOG_FILE, "r", encoding="utf-8") as fh:
-                old = fh.read()
+            old = read_tail_nofollow(LOG_FILE, LOG_MAX_BYTES)
         except OSError:
             pass
-        lines = [l for l in old.splitlines() if l][-(LOG_LINES - 1):]
-        lines.append(f"{stamp} {line}")
+        lines = [l for l in old.splitlines() if l]
+        if lines and not TIMESTAMPED.match(lines[0]):
+            lines.pop(0)        # a part line, from a tail that started mid-line
+
+        # One failure, one line. An unreachable server with the panel polling
+        # every half-second would otherwise write the same sentence hundreds of
+        # times, two fsyncs apiece, evicting the history the log exists to keep.
+        if lines and message_of(lines[-1]) == line:
+            if time.time() - stamp_of(lines[-1]) < LOG_REPEAT_SECONDS:
+                return                      # said recently enough; say nothing
+            lines[-1] = f"{stamp} {line}{REPEAT_SUFFIX}"
+        else:
+            lines.append(f"{stamp} {line}")
+        lines = lines[-LOG_LINES:]
         atomic_write(LOG_FILE, ("\n".join(lines) + "\n").encode("utf-8"),
                      0o600, fatal=False)
     except Exception:
@@ -146,6 +220,92 @@ def emit(payload: dict) -> None:
     payload.setdefault("ok", True)
     json.dump(payload, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
+
+
+_index_lock_fd = None       # kept alive for the process; closing drops the lock
+
+
+def open_lock_file() -> int:
+    """A descriptor on the index lock, inside the verified state directory."""
+    dir_fd = open_state_dir(os.path.dirname(LOCK_FILE), fatal=False)
+    try:
+        return os.open(os.path.basename(LOCK_FILE),
+                       os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600,
+                       dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def take_index_lock() -> bool:
+    """Claim the right to index. False means somebody else already has it.
+
+    flock rather than a pid written into a file: the check and the claim are
+    one atomic operation, so two starters cannot both get past it, and the
+    kernel releases it when the holder dies — a killed indexer leaves nothing
+    stale behind, and no recovery heuristic can ever take the lock away from an
+    indexer that is still running.
+    """
+    global _index_lock_fd
+    try:
+        fd = open_lock_file()
+    except OSError:
+        return True         # no lock available: fall back to the pid check
+    # A few quick retries. A real indexer holds this for minutes, so retrying
+    # can never mask one; a `progress` poll holds it for microseconds while it
+    # tests whether a scan is running, and that must not be mistaken for one.
+    for attempt in range(4):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                os.close(fd)
+                return True     # a filesystem with no locking: let them index
+            if attempt == 3:
+                os.close(fd)
+                return False    # someone is indexing right now
+            time.sleep(0.05)
+            continue
+        _index_lock_fd = fd     # held until this process exits
+        return True
+    os.close(fd)
+    return False
+
+
+def lock_is_held() -> bool | None:
+    """Is an index running? None when the question cannot be answered."""
+    try:
+        fd = open_lock_file()
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            return True
+        return None
+    finally:
+        os.close(fd)        # closing drops the lock we just took to test it
+    return False
+
+
+def read_tail_nofollow(path: str, max_bytes: int) -> str:
+    """The last `max_bytes` of a file we own, refusing to follow a symlink.
+
+    The writers were hardened first; this is the reader that matters, because
+    the failure log is read back in full before every append. A symlink planted
+    at the log would otherwise have its target's tail copied into the log, and
+    a large target would be pulled into memory whole on the way.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            return ""
+        if st.st_size > max_bytes:
+            os.lseek(fd, st.st_size - max_bytes, os.SEEK_SET)
+        return os.read(fd, max_bytes).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
 
 
 def index_running(progress: dict) -> bool:
@@ -318,6 +478,25 @@ def bounded_text(value, limit: int = MAX_FIELD_CHARS) -> str:
     """A string short enough to publish to the shell."""
     text = str(value or "")
     return text[:limit] if len(text) > limit else text
+
+
+MAX_STAGE_CHARS = 32
+PROGRESS_FIELDS = ("artists", "artistTotal", "tracks", "trackTotal",
+                   "startedAt", "updatedAt", "finishedAt", "pid")
+
+
+def bounded_progress(state: dict) -> dict:
+    """A progress record with every field clamped to something sane.
+
+    Nothing here is user input today, but it is the one record the panel reads
+    straight into shell properties, so it is bounded on principle: a stage name
+    is a short word, and every other field is a number or it is not there.
+    """
+    out = {"stage": bounded_text(state.get("stage"), MAX_STAGE_CHARS)}
+    for field in PROGRESS_FIELDS:
+        if field in state:
+            out[field] = bounded_int(state.get(field))
+    return out
 
 
 def bounded_int(value, default: int = 0) -> int:
@@ -1156,9 +1335,9 @@ def cmd_status(args) -> None:
 def cmd_index(args) -> None:
     # One indexer at a time. The panel guards this too, but a shell restart
     # loses that flag, and two indexers would fight over the same files and
-    # double the load on the server for no benefit.
-    running = read_json(PROGRESS_FILE, {})
-    if index_running(running) and running.get("pid") != os.getpid():
+    # double the load on the server for no benefit. The lock is taken before
+    # anything else, so two starters racing each other cannot both get through.
+    if not take_index_lock():
         die("an index is already running", code=5)
 
     started = int(time.time())
@@ -1166,7 +1345,7 @@ def cmd_index(args) -> None:
              "tracks": 0, "trackTotal": 0, "startedAt": started,
              "pid": os.getpid()}
 
-    def publish(**changes) -> None:
+    def publish(**changes) -> None:   # noqa: D401 — see the docstring below
         """Say how far we have got, for the panel's live counts.
 
         Written on every page — a page is a second or two of work, which is
@@ -1176,7 +1355,10 @@ def cmd_index(args) -> None:
         state.update(changes)
         state["updatedAt"] = int(time.time())
         try:
-            write_json(PROGRESS_FILE, state, mode=0o600)
+            # Bounded on the way out as well as on the way back in. This file
+            # is the only thing the panel learns about a running scan from, so
+            # it obeys the same "cap what is published" rule as the index.
+            write_json(PROGRESS_FILE, bounded_progress(state), mode=0o600)
         except Exception:
             pass          # progress is a nicety; never fail an index over it
 
@@ -1224,11 +1406,17 @@ def cmd_progress(args) -> None:
     to Plex, so polling it every couple of seconds during a scan costs nothing.
     """
     state = read_json(PROGRESS_FILE, {}) or {}
-    running = index_running(state)
+    # The lock is the truth: it exists exactly as long as an indexer does. The
+    # recorded pid is the fallback for a filesystem that cannot lock.
+    held = lock_is_held()
+    running = index_running(state) if held is None else held
+    if state.get("stage") == "done":
+        running = False
     now = int(time.time())
     emit({
         "running": running,
-        "stage": state.get("stage") or ("done" if state else "none"),
+        "stage": bounded_text(
+            state.get("stage") or ("done" if state else "none"), 32),
         "artists": bounded_int(state.get("artists")),
         "artistTotal": bounded_int(state.get("artistTotal")),
         "tracks": bounded_int(state.get("tracks")),
@@ -1612,12 +1800,18 @@ def cmd_now(args) -> None:
         if os.path.exists(cached):
             art = cached
         elif not args.no_fetch:
+            # No cover is not worth an error line, and certainly not worth a
+            # second JSON object on a stream the panel is parsing.
             try:
-                plex = Plex()
-                plex.resolve_base()
-                art = plex.art_path(thumb)
-            except SystemExit:
+                with quiet():
+                    plex = Plex()
+                    plex.resolve_base()
+                    art = plex.art_path(thumb)
+            except (PlexUnavailable, OSError) as exc:
                 art = None
+                # Logged, but the repeat guard keeps one unreachable server to
+                # one line rather than two a second.
+                log_failure(f"now: no artwork ({exc})")
 
     emit({
         "playing": True,
