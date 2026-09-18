@@ -31,10 +31,19 @@ Item {
   // ---- account + server ---------------------------------------------------
   property bool linked: false
   property string server: ""
+  // The music library the helper is indexing, "" until one is chosen.
+  property string section: ""
   property string lastError: ""
   property string linkCode: ""
   property bool linking: false
   property bool indexing: false
+  // Whether the running index process has printed its JSON yet, so a helper
+  // that dies silently can still be reported once.
+  property bool indexReplied: false
+  // One shot per session: an install that is linked, has a server, and still
+  // has no index gets one automatic attempt when the panel first sees it.
+  // That is what repairs the machines already stuck in the first-run trap.
+  property bool firstIndexTried: false
 
   // ---- library ------------------------------------------------------------
   // Every artist, in Plex's own sort order (which files "The Beatles" under B).
@@ -162,11 +171,20 @@ Item {
       console.warn("plexmusic:", root.indexError)
       return null
     }
-    return root.parse(s)
+    var d = root.parse(s)
+    if (d === null && s !== "") {
+      root.indexError = "the " + what + " index file is not readable JSON"
+      console.warn("plexmusic:", root.indexError)
+    }
+    return d
   }
 
   // Refuse an over-long list, and clamp the strings inside the ones we keep.
+  // `null` in means the file was already refused by parseIndex — pass that
+  // refusal straight through, or the caller would replace a good index with an
+  // empty one and this function's success path would wipe the reason with it.
   function boundedIndexList(list, what) {
+    if (list === null) return null
     if (!list || list.length === undefined) return []
     if (list.length > root.maxIndexItems) {
       root.indexError = what + " index holds " + list.length
@@ -217,7 +235,10 @@ Item {
 
   function applyTrackIndex() {
     var d = root.parseIndex(trackIndexFile.text(), "track")
-    var list = root.boundedIndexList((d && d.tracks) ? d.tracks : [], "track")
+    // Refused or unreadable: keep whatever index we already had, and keep the
+    // reason parseIndex recorded, rather than blanking the library.
+    if (d === null) return
+    var list = root.boundedIndexList(d.tracks ? d.tracks : [], "track")
     if (list === null) return
     var idx = {}
     for (var i = 0; i < list.length; i++) {
@@ -231,7 +252,8 @@ Item {
 
   function applyIndex() {
     var d = root.parseIndex(indexFile.text(), "artist")
-    var list = root.boundedIndexList((d && d.artists) ? d.artists : [], "artist")
+    if (d === null) return
+    var list = root.boundedIndexList(d.artists ? d.artists : [], "artist")
     if (list === null) return
     var idx = {}
     for (var i = 0; i < list.length; i++) {
@@ -291,6 +313,15 @@ Item {
         if (!d) return
         root.linked = !!d.linked
         root.server = d.server || ""
+        root.section = d.section ? String(d.section) : ""
+        // Already set up but never indexed — the state every machine that hit
+        // the first-run trap is sitting in. Try once per session, so an empty
+        // Plex library does not turn into an indexing loop.
+        if (d.linked && root.server && !root.firstIndexTried && !root.indexing
+            && !d.indexedAt && root.artistCount === 0) {
+          root.firstIndexTried = true
+          Qt.callLater(function () { root.reindex() })
+        }
         // The library was scanned since we indexed it: rebuild quietly, so
         // anything added to Plex appears here without a manual rescan.
         if (d.linked && d.libraryScannedAt && d.indexedAt && d.libraryScannedAt > d.indexedAt
@@ -383,12 +414,43 @@ Item {
     command: [root.helper, "index"]
     stdout: StdioCollector {
       onStreamFinished: {
+        root.indexReplied = true
         root.indexing = false
         var d = root.parse(text)
-        if (d && d.ok === false) root.lastError = d.error || "could not index"
+        if (!d)
+          root.indexError = "the indexer answered with nothing"
+        else if (d.ok === false)
+          root.indexError = d.error || "could not index the library"
+        else
+          root.indexError = ""
+        if (root.indexError !== "") {
+          root.lastError = root.indexError
+          root.showToast("Indexing failed: " + root.indexError)
+        } else if (d) {
+          root.showToast((d.artistCount || 0) + " artists, "
+            + (d.trackCount || 0) + " songs indexed")
+        }
         // The FileView watches the index file and reloads it on its own.
         root.refreshStatus()
       }
+    }
+  }
+
+  Connections {
+    target: indexProc
+    // Safety net. A helper that dies without printing its JSON — a traceback
+    // on stderr, a missing python3 — used to leave the panel saying "Indexing
+    // the library…" for ever, with Rescan disabled and nothing to read. Now
+    // the panel says what happened and the button comes back.
+    function onExited(exitCode, exitStatus) {
+      if (root.indexReplied) return
+      root.indexing = false
+      root.indexError = exitCode === 0
+        ? "the indexer stopped without indexing anything"
+        : "the indexer failed (exit " + exitCode + ")"
+      root.lastError = root.indexError
+      root.showToast("Indexing failed: " + root.indexError)
+      root.refreshStatus()
     }
   }
 
@@ -458,9 +520,25 @@ Item {
     favProc.command = [root.helper, "favourites", "list"]
     favProc.running = true
   }
+  // Rebuild the index. Every reason it cannot start is written where the panel
+  // shows it — a Rescan that does nothing and says nothing is the bug this
+  // release fixes.
   function reindex() {
     if (root.indexing) return
+    if (!root.linked) {
+      root.indexError = "not linked to Plex yet — link the account in Settings"
+      return
+    }
+    if (!root.server) {
+      root.indexError = "no Plex server yet — add its address in Settings"
+      return
+    }
+    root.indexError = ""
+    root.indexReplied = false
     root.indexing = true
+    // A full library takes minutes and writes nothing to watch until it is
+    // done, so say so out loud the moment the button is pressed.
+    root.showToast("Indexing your library — this can take a few minutes")
     indexProc.running = true
   }
 
@@ -865,6 +943,17 @@ Item {
             ? "Using " + d.added + " (" + d.ms + " ms)"
             : d.added + " did not answer — kept in the list, not in use"
           if (d.active !== undefined) root.server = d.active || ""
+          if (d.section) root.section = String(d.section)
+          // The first-run trap. The natural order is link the account, then
+          // add the server — and the link poll's index attempt had no address
+          // to use, so it died in resolve_base() and nothing ever tried again.
+          // A reachable address now indexes itself.
+          if (d.reachable && root.linked && root.artistCount === 0
+              && !root.indexing) {
+            root.settingsNote = "Indexing the library…"
+            root.firstIndexTried = true
+            Qt.callLater(function () { root.reindex() })
+          }
         } else if (d && d.error) {
           root.settingsNote = d.error
         }

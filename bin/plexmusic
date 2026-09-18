@@ -14,6 +14,7 @@ import argparse
 import errno
 import json
 import os
+import re
 import secrets
 import socket
 import stat
@@ -40,6 +41,8 @@ CACHE_DIR = os.path.join(
     "omarchy-plex-music",
 )
 ART_DIR = os.path.join(CACHE_DIR, "art")
+LOG_FILE = os.path.join(CACHE_DIR, "plexmusic.log")
+LOG_LINES = 200
 
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
 IPC_SOCKET = os.path.join(RUNTIME_DIR, "omarchy-plexmusic.sock")
@@ -75,6 +78,10 @@ MAX_ART_BYTES = 12 * 1024 * 1024
 MAX_INDEX_ITEMS = 250_000
 MAX_FIELD_CHARS = 512
 
+# Belt and braces for the log: the token travels in a header everywhere, but a
+# line that somehow carried one must never reach a file we keep.
+TOKEN_IN_TEXT = re.compile(r"X-Plex-Token=[^&\s\"']+")
+
 # No server addresses are baked in. They come from one of two places, in this
 # order: addresses the user typed in (settings.json "servers" — that is how a
 # Tailscale address gets used, since plex.tv does not advertise tailnet IPs),
@@ -86,9 +93,50 @@ MAX_FIELD_CHARS = 512
 # --------------------------------------------------------------------------- #
 
 def die(message: str, code: int = 1) -> "NoReturn":  # type: ignore[name-defined]
+    log_failure(message)
     json.dump({"ok": False, "error": message}, sys.stdout)
     sys.stdout.write("\n")
     sys.exit(code)
+
+
+_logging = False
+
+
+def log_failure(message: str) -> None:
+    """Append one line to the failure log, so a bad run leaves a trace.
+
+    The panel shows the reason now, but a panel nobody was looking at used to
+    lose it entirely — the first-run indexing bug had to be reconstructed from
+    file timestamps because nothing anywhere recorded it.
+
+    The log keeps the last LOG_LINES lines, is written 0600 through the same
+    no-follow atomic writer as everything else, and never carries a token: any
+    `X-Plex-Token=` value is redacted before the line is stored. Failing to
+    write the log is never itself worth failing over, and the `_logging` guard
+    stops a write error inside `die()` from recursing.
+    """
+    global _logging
+    if _logging:
+        return
+    _logging = True
+    try:
+        line = TOKEN_IN_TEXT.sub("X-Plex-Token=<redacted>", str(message))
+        line = line.replace("\n", " ")[:1000]
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        old = ""
+        try:
+            with open(LOG_FILE, "r", encoding="utf-8") as fh:
+                old = fh.read()
+        except OSError:
+            pass
+        lines = [l for l in old.splitlines() if l][-(LOG_LINES - 1):]
+        lines.append(f"{stamp} {line}")
+        atomic_write(LOG_FILE, ("\n".join(lines) + "\n").encode("utf-8"),
+                     0o600, fatal=False)
+    except Exception:
+        pass        # a log we cannot write must never replace the real error
+    finally:
+        _logging = False
 
 
 def emit(payload: dict) -> None:
@@ -105,7 +153,11 @@ def read_json(path: str, default):
         return default
 
 
-def open_state_dir(path: str) -> int:
+class UnsafeState(OSError):
+    """The place we were about to write is not one we trust."""
+
+
+def open_state_dir(path: str, fatal: bool = True) -> int:
     """Open a private directory of ours and return a verified descriptor.
 
     Everything this program writes — the Plex token in auth.json, the queue
@@ -117,8 +169,15 @@ def open_state_dir(path: str) -> int:
     tightened to 0700 in place (through the descriptor, not the path, so there
     is nothing to swap underneath us); anything else is fatal.
 
-    The caller owns the descriptor and must close it.
+    The caller owns the descriptor and must close it. `fatal` is False for the
+    failure log, which must raise rather than print a second answer on stdout
+    over the top of the error it was called to record.
     """
+    def refuse(reason: str) -> "NoReturn":  # type: ignore[name-defined]
+        if fatal:
+            die(reason)
+        raise UnsafeState(reason)
+
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, mode=0o700, exist_ok=True)
@@ -130,27 +189,28 @@ def open_state_dir(path: str) -> int:
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-            die(f"{path} is not a directory — refusing to write through it")
+            refuse(f"{path} is not a directory — refusing to write through it")
         raise
     try:
         st = os.fstat(fd)
         if not stat.S_ISDIR(st.st_mode):
-            die(f"{path} is not a directory — refusing to write through it")
+            refuse(f"{path} is not a directory — refusing to write through it")
         if st.st_uid != os.getuid():
-            die(f"{path} is not owned by you — refusing to write through it")
+            refuse(f"{path} is not owned by you — refusing to write through it")
         if st.st_mode & 0o077:
             os.fchmod(fd, 0o700)
             st = os.fstat(fd)
             if st.st_mode & 0o077:
-                die(f"{path} is not private (mode "
-                    f"{stat.S_IMODE(st.st_mode):04o}) — refusing to write")
+                refuse(f"{path} is not private (mode "
+                       f"{stat.S_IMODE(st.st_mode):04o}) — refusing to write")
     except BaseException:
         os.close(fd)
         raise
     return fd
 
 
-def atomic_write(path: str, data: bytes, mode: int = 0o600) -> None:
+def atomic_write(path: str, data: bytes, mode: int = 0o600,
+                 fatal: bool = True) -> None:
     """Replace `path` with `data`, safely, and durably.
 
     The temporary file is created inside a verified owner-only directory,
@@ -163,7 +223,7 @@ def atomic_write(path: str, data: bytes, mode: int = 0o600) -> None:
     and never somebody else's file.
     """
     directory, name = os.path.split(path)
-    dir_fd = open_state_dir(directory)
+    dir_fd = open_state_dir(directory, fatal=fatal)
     tmp = f".{name}.{secrets.token_hex(8)}.tmp"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -172,8 +232,11 @@ def atomic_write(path: str, data: bytes, mode: int = 0o600) -> None:
             st = os.fstat(fd)
             if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
                     or st.st_nlink != 1):
-                die(f"refusing to write {path}: the temporary file is not the "
-                    "private regular file we just created")
+                reason = (f"refusing to write {path}: the temporary file is "
+                          "not the private regular file we just created")
+                if fatal:
+                    die(reason)
+                raise UnsafeState(reason)
             os.fchmod(fd, mode)
             written = 0
             while written < len(data):
@@ -424,7 +487,13 @@ class Plex:
 
     # -- library ------------------------------------------------------------ #
 
-    def find_music_section(self) -> str:
+    def find_music_section(self, required: bool = True) -> str:
+        """The key of the music library, or "" when `required` is False.
+
+        `required` exists so that pinning a server can quietly pick a section
+        without a server that has no music library turning into a fatal error
+        on an otherwise perfectly good `server --use`.
+        """
         data = self.get("/library/sections")
         for d in data.get("MediaContainer", {}).get("Directory", []):
             if d.get("type") == "artist" and d.get("title", "").lower() == "music":
@@ -433,6 +502,8 @@ class Plex:
         for d in data.get("MediaContainer", {}).get("Directory", []):
             if d.get("type") == "artist":
                 return str(d.get("key"))
+        if not required:
+            return ""
         die("no music (artist) library section found on this Plex server")
 
     def all_artists(self, page: int = 1000) -> list[dict]:
@@ -631,9 +702,20 @@ class Plex:
         return tracks
 
     def all_tracks(self, page: int = 5000) -> list[dict]:
-        """Every track, slim, in Plex's title order — the song search index."""
+        """Every track, slim — the song search index.
+
+        Plex does not return these in any order we can rely on (a fresh index
+        starts #, Y, L), so nothing downstream may assume one: the panel folds
+        and sorts client-side, and the A-Z strip is built from the `letter`
+        field rather than from position.
+        """
         out: list[dict] = []
         start = 0
+        # How many rows Plex said it had, and how many we dropped for having no
+        # title at all. Reported by `index` so a gap between the two is visible
+        # rather than something to work out from the file afterwards.
+        self.track_total = 0
+        self.track_skipped = 0
         while True:
             data = self.get(
                 f"/library/sections/{self.section}/all",
@@ -641,9 +723,12 @@ class Plex:
                  "X-Plex-Container-Size": page})
             container = data.get("MediaContainer", {})
             batch = container.get("Metadata") or []
+            self.track_total = max(self.track_total,
+                                   bounded_int(container.get("totalSize")))
             for m in batch:
                 title = bounded_text(m.get("title"))
                 if not title:
+                    self.track_skipped += 1
                     continue
                 sort_key = fold(m.get("titleSort") or title).lstrip()
                 first = sort_key[:1] or "#"
@@ -912,11 +997,27 @@ def cmd_server(args) -> None:
         if rtt is not None:
             # Pin it: this is now the address, until it stops answering.
             settings["baseUrl"] = uri
+            # And choose the music library straight away. Without this, someone
+            # who links the account and only then adds the server ends up with
+            # a linked, reachable, correctly configured plugin and a
+            # permanently empty library: the index attempt that fires after
+            # linking had no address yet, and adding one never set a section or
+            # tried again.
+            if not settings.get("musicSection"):
+                try:
+                    plex.base = uri
+                    plex.settings = settings
+                    section = plex.find_music_section(required=False)
+                    if section:
+                        settings["musicSection"] = section
+                except Exception:
+                    pass                  # the panel can still pick one by hand
         elif settings.get("baseUrl") == uri:
             settings.pop("baseUrl", None)
         write_json(SETTINGS_FILE, settings)
         emit({"servers": servers, "active": settings.get("baseUrl"),
               "added": uri, "reachable": rtt is not None,
+              "section": settings.get("musicSection") or "",
               "ms": round(rtt * 1000, 1) if rtt is not None else None})
         return
 
@@ -1049,6 +1150,8 @@ def cmd_index(args) -> None:
         "tracks": tracks,
     }, mode=0o644)
     emit({"artistCount": len(artists), "trackCount": len(tracks),
+          "trackTotal": getattr(plex, "track_total", 0),
+          "trackSkipped": getattr(plex, "track_skipped", 0),
           "server": plex.base, "section": plex.section})
 
 

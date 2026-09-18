@@ -91,6 +91,17 @@ PanelWindow {
   function fmtMs(ms) { return fmt((ms || 0) / 1000) }
 
   function dim(a) { return Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, a) }
+
+  // What to say about the index, wherever the panel would otherwise claim the
+  // library is simply empty: the run in progress, or the reason the last one
+  // could not happen, before falling back to `idle`. Pressing Rescan and being
+  // told nothing at all was the complaint this answers.
+  function indexState(idle) {
+    if (!root.service) return idle
+    if (root.service.indexing) return "Indexing the library…"
+    if (root.service.indexError !== "") return root.service.indexError
+    return idle
+  }
   function acc(a) { return Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, a) }
 
   // Click-away closes, as every other Omarchy panel does.
@@ -980,18 +991,26 @@ PanelWindow {
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
             visible: artistList.count === 0 && !side.searchingNow && root.service && !root.service.browseAll
-            text: "Tap the star on any artist to keep them here."
+            // Favourites is the view a first-run user lands on, and by
+            // definition it is empty. Without this, a 2½-minute index ran
+            // behind an unchanging "tap the star" line and looked like a
+            // button that did nothing.
+            text: root.indexState("Tap the star on any artist to keep them here.")
             font.pixelSize: 11
-            color: root.dim(0.35)
+            color: root.service && root.service.indexError !== "" ? Color.urgent
+                                                                  : root.dim(0.35)
           }
 
           Text {
             anchors.centerIn: parent
             visible: artistList.count === 0 && side.showingAll
-            text: root.service && root.service.indexing ? "Indexing the library…"
-                                                        : "No index yet — press the rescan button above."
+            text: root.indexState("No index yet — press the rescan button above.")
+            width: parent.width - 40
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
             font.pixelSize: 11
-            color: root.dim(0.35)
+            color: root.service && root.service.indexError !== "" ? Color.urgent
+                                                                  : root.dim(0.35)
           }
         }
 
@@ -1136,9 +1155,13 @@ PanelWindow {
           Text {
             anchors.centerIn: parent
             visible: songsList.count === 0
-            text: root.service && root.service.indexing ? "Indexing the library…" : "No song index yet — press the rescan button above."
+            text: root.indexState("No song index yet — press the rescan button above.")
+            width: parent.width - 40
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
             font.pixelSize: 11
-            color: root.dim(0.35)
+            color: root.service && root.service.indexError !== "" ? Color.urgent
+                                                                  : root.dim(0.35)
           }
         }
 
@@ -2059,12 +2082,14 @@ PanelWindow {
             spacing: 10
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              text: root.service
-                ? (root.service.indexing ? "Indexing…"
-                   : root.service.artistCount + " artists indexed. Rescan after adding music to Plex.")
-                : ""
+              width: 300
+              wrapMode: Text.WordWrap
+              text: root.indexState(
+                root.service ? root.service.artistCount
+                  + " artists indexed. Rescan after adding music to Plex." : "")
               font.pixelSize: 12
-              color: Color.foreground
+              color: root.service && root.service.indexError !== "" ? Color.urgent
+                                                                    : Color.foreground
             }
             TextBtn {
               label: "Rescan"

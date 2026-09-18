@@ -150,7 +150,8 @@ class WriterCoverageTests(unittest.TestCase):
         self.assertEqual(src.count("os.open(tmp"), 1)
         self.assertIn("os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW", src)
         # Every file write in the program goes through it.
-        self.assertEqual(src.count("atomic_write("), 4)  # def + json + m3u + art
+        # def + write_json + m3u + art cache + failure log
+        self.assertEqual(src.count("atomic_write("), 5)
 
 
 if __name__ == "__main__":
