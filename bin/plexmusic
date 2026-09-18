@@ -43,6 +43,9 @@ CACHE_DIR = os.path.join(
 ART_DIR = os.path.join(CACHE_DIR, "art")
 LOG_FILE = os.path.join(CACHE_DIR, "plexmusic.log")
 LOG_LINES = 200
+# Where a running index says how far it has got, so the panel can show counts
+# going up instead of freezing for the minutes a big library takes.
+PROGRESS_FILE = os.path.join(DATA_DIR, "index-progress.json")
 
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
 IPC_SOCKET = os.path.join(RUNTIME_DIR, "omarchy-plexmusic.sock")
@@ -143,6 +146,23 @@ def emit(payload: dict) -> None:
     payload.setdefault("ok", True)
     json.dump(payload, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
+
+
+def index_running(progress: dict) -> bool:
+    """Is the indexer in `progress` still alive?
+
+    A progress file outlives the process that wrote it — a killed indexer, a
+    machine that lost power mid-scan — so the pid is checked rather than
+    trusted, and it has to still be one of ours.
+    """
+    pid = progress.get("pid")
+    if not pid or progress.get("stage") == "done":
+        return False
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as fh:
+            return b"plexmusic" in fh.read()
+    except (OSError, ValueError):
+        return False
 
 
 def read_json(path: str, default):
@@ -506,7 +526,7 @@ class Plex:
             return ""
         die("no music (artist) library section found on this Plex server")
 
-    def all_artists(self, page: int = 1000) -> list[dict]:
+    def all_artists(self, page: int = 1000, on_progress=None) -> list[dict]:
         artists: list[dict] = []
         start = 0
         while True:
@@ -540,6 +560,8 @@ class Plex:
                 })
             total = container.get("totalSize", len(artists))
             start += len(batch)
+            if on_progress:
+                on_progress(len(artists), bounded_int(total))
             if len(artists) > MAX_INDEX_ITEMS:
                 die(f"this library reports more than {MAX_INDEX_ITEMS} artists "
                     "— refusing to build an index that large")
@@ -701,7 +723,7 @@ class Plex:
             })
         return tracks
 
-    def all_tracks(self, page: int = 5000) -> list[dict]:
+    def all_tracks(self, page: int = 5000, on_progress=None) -> list[dict]:
         """Every track, slim — the song search index.
 
         Plex does not return these in any order we can rely on (a fresh index
@@ -746,6 +768,8 @@ class Plex:
                 })
             total = container.get("totalSize", len(out))
             start += len(batch)
+            if on_progress:
+                on_progress(len(out), self.track_total or bounded_int(total))
             if len(out) > MAX_INDEX_ITEMS:
                 die(f"this library reports more than {MAX_INDEX_ITEMS} tracks "
                     "— refusing to build an index that large")
@@ -957,7 +981,8 @@ def cmd_link(args) -> None:
     if args.action == "forget":
         # Wipe every trace of the account from this machine.
         for path in (AUTH_FILE, PENDING_PIN_FILE, SETTINGS_FILE,
-                     ARTISTS_FILE, TRACKS_FILE, QUEUE_FILE, PLAYLIST_FILE):
+                     ARTISTS_FILE, TRACKS_FILE, QUEUE_FILE, PLAYLIST_FILE,
+                     PROGRESS_FILE):
             try:
                 os.unlink(path)
             except OSError:
@@ -1129,30 +1154,89 @@ def cmd_status(args) -> None:
 
 
 def cmd_index(args) -> None:
+    # One indexer at a time. The panel guards this too, but a shell restart
+    # loses that flag, and two indexers would fight over the same files and
+    # double the load on the server for no benefit.
+    running = read_json(PROGRESS_FILE, {})
+    if index_running(running) and running.get("pid") != os.getpid():
+        die("an index is already running", code=5)
+
+    started = int(time.time())
+    state = {"stage": "starting", "artists": 0, "artistTotal": 0,
+             "tracks": 0, "trackTotal": 0, "startedAt": started,
+             "pid": os.getpid()}
+
+    def publish(**changes) -> None:
+        """Say how far we have got, for the panel's live counts.
+
+        Written on every page — a page is a second or two of work, which is
+        the right granularity for a number a person is watching, and cheap
+        next to the request that produced it.
+        """
+        state.update(changes)
+        state["updatedAt"] = int(time.time())
+        try:
+            write_json(PROGRESS_FILE, state, mode=0o600)
+        except Exception:
+            pass          # progress is a nicety; never fail an index over it
+
+    publish()
     plex = Plex()
     plex.resolve_base(force=True)
     if not read_json(SETTINGS_FILE, {}).get("musicSection"):
         plex.section = plex.find_music_section()
         plex.settings["musicSection"] = plex.section
         write_json(SETTINGS_FILE, plex.settings)
-    artists = plex.all_artists()
+
+    publish(stage="artists")
+    artists = plex.all_artists(
+        on_progress=lambda n, total: publish(artists=n, artistTotal=total))
     write_json(ARTISTS_FILE, {
         "indexedAt": int(time.time()),
         "server": plex.base,
         "section": plex.section,
         "artists": artists,
     }, mode=0o644)
-    tracks = plex.all_tracks()
+
+    publish(stage="tracks", artists=len(artists))
+    tracks = plex.all_tracks(
+        on_progress=lambda n, total: publish(tracks=n, trackTotal=total))
     write_json(TRACKS_FILE, {
         "indexedAt": int(time.time()),
         "server": plex.base,
         "section": plex.section,
         "tracks": tracks,
     }, mode=0o644)
-    emit({"artistCount": len(artists), "trackCount": len(tracks),
-          "trackTotal": getattr(plex, "track_total", 0),
-          "trackSkipped": getattr(plex, "track_skipped", 0),
-          "server": plex.base, "section": plex.section})
+
+    result = {"artistCount": len(artists), "trackCount": len(tracks),
+              "trackTotal": getattr(plex, "track_total", 0),
+              "trackSkipped": getattr(plex, "track_skipped", 0),
+              "server": plex.base, "section": plex.section}
+    publish(stage="done", artists=len(artists), tracks=len(tracks),
+            finishedAt=int(time.time()))
+    emit(result)
+
+
+def cmd_progress(args) -> None:
+    """How far the running index has got — polled by the panel while it runs.
+
+    Deliberately its own tiny command: it reads one small file and never talks
+    to Plex, so polling it every couple of seconds during a scan costs nothing.
+    """
+    state = read_json(PROGRESS_FILE, {}) or {}
+    running = index_running(state)
+    now = int(time.time())
+    emit({
+        "running": running,
+        "stage": state.get("stage") or ("done" if state else "none"),
+        "artists": bounded_int(state.get("artists")),
+        "artistTotal": bounded_int(state.get("artistTotal")),
+        "tracks": bounded_int(state.get("tracks")),
+        "trackTotal": bounded_int(state.get("trackTotal")),
+        "startedAt": bounded_int(state.get("startedAt")),
+        "elapsed": (now - bounded_int(state.get("startedAt"))
+                    if state.get("startedAt") else 0),
+    })
 
 
 def load_index() -> list[dict]:
@@ -1592,6 +1676,9 @@ def main() -> None:
     p = sub.add_parser("index")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_index)
+
+    sub.add_parser("progress", help="how far a running index has got"
+                   ).set_defaults(func=cmd_progress)
 
     p = sub.add_parser("search")
     p.add_argument("query")

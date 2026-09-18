@@ -40,6 +40,33 @@ Item {
   // Whether the running index process has printed its JSON yet, so a helper
   // that dies silently can still be reported once.
   property bool indexReplied: false
+  // Live progress of a running scan, polled from the helper. A big library
+  // takes minutes, and a number that climbs is the difference between "it is
+  // working" and "this button does nothing".
+  property int indexArtists: 0
+  property int indexTracks: 0
+  property int indexTrackTotal: 0
+  property string indexStage: ""          // "artists", "tracks", "done"
+  property int indexElapsed: 0            // seconds since the scan started
+
+  // One line for any view to show: what the scan is doing, with its counts.
+  readonly property string indexProgress: {
+    if (!indexing) return ""
+    var bits = []
+    if (indexArtists > 0) bits.push(indexArtists.toLocaleString() + " artists")
+    if (indexTracks > 0)
+      bits.push(indexTrackTotal > 0
+        ? indexTracks.toLocaleString() + " of " + indexTrackTotal.toLocaleString() + " songs"
+        : indexTracks.toLocaleString() + " songs")
+    var head = bits.length > 0 ? "Scanning your library — " + bits.join(" · ")
+                               : "Scanning your library…"
+    if (indexElapsed > 0) {
+      var m = Math.floor(indexElapsed / 60)
+      var sec = indexElapsed % 60
+      head += "  (" + m + ":" + (sec < 10 ? "0" : "") + sec + ")"
+    }
+    return head
+  }
   // One shot per session: an install that is linked, has a server, and still
   // has no index gets one automatic attempt when the panel first sees it.
   // That is what repairs the machines already stuck in the first-run trap.
@@ -217,12 +244,23 @@ Item {
 
   // ---- the index ----------------------------------------------------------
 
+  // ⚠️ A FileView can only be trusted for a file that already existed when it
+  // was constructed. On a fresh install neither index file is there when the
+  // shell starts, so the load fails and no watch is ever attached — which is
+  // why a first-time user used to stay at an empty panel until they restarted
+  // the shell. Anything the helper creates must be re-read explicitly once the
+  // helper says it is there: see reloadIndexFiles().
   FileView {
     id: indexFile
     path: root.indexPath
     watchChanges: true
     onLoaded: root.applyIndex()
     onFileChanged: reload()
+    onLoadFailed: function (error) {
+      // Absent before the first index is normal and not worth a message.
+      if (root.artistCount > 0)
+        root.indexError = "the artist index could not be read"
+    }
   }
 
   FileView {
@@ -231,6 +269,20 @@ Item {
     watchChanges: true
     onLoaded: root.applyTrackIndex()
     onFileChanged: reload()
+    onLoadFailed: function (error) {
+      if (root.trackCount > 0)
+        root.indexError = "the song index could not be read"
+    }
+  }
+
+  // Re-read both index files from scratch. Re-assigning `path` re-runs the
+  // load AND attaches the watcher, which a bare reload() on a FileView that
+  // never managed to load does not.
+  function reloadIndexFiles() {
+    indexFile.path = ""
+    indexFile.path = root.indexPath
+    trackIndexFile.path = ""
+    trackIndexFile.path = root.trackIndexPath
   }
 
   function applyTrackIndex() {
@@ -427,10 +479,15 @@ Item {
           root.lastError = root.indexError
           root.showToast("Indexing failed: " + root.indexError)
         } else if (d) {
+          root.indexArtists = d.artistCount || 0
+          root.indexTracks = d.trackCount || 0
           root.showToast((d.artistCount || 0) + " artists, "
             + (d.trackCount || 0) + " songs indexed")
         }
-        // The FileView watches the index file and reloads it on its own.
+        // The panel reloads itself the moment the scan ends. Never leave this
+        // to the file watcher: on a first index the files did not exist when
+        // these readers were built, so there is no watch to fire.
+        root.reloadIndexFiles()
         root.refreshStatus()
       }
     }
@@ -450,8 +507,48 @@ Item {
         : "the indexer failed (exit " + exitCode + ")"
       root.lastError = root.indexError
       root.showToast("Indexing failed: " + root.indexError)
+      // It may still have written one of the two files before it died.
+      root.reloadIndexFiles()
       root.refreshStatus()
     }
+  }
+
+  // While a scan runs, ask the helper how far it has got. `progress` reads one
+  // small file and never touches Plex, so polling it is free next to the scan
+  // itself. This is what makes the counts climb in every view.
+  Process {
+    id: progressProc
+    command: [root.helper, "progress"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var d = root.parse(text)
+        if (!d || d.ok === false) return
+        // A scan started by something else — most often one that survived a
+        // shell restart. Adopt it rather than offering to start a second.
+        if (d.running && !root.indexing) {
+          root.indexing = true
+          root.indexReplied = true      // not our process; nothing to report
+        } else if (!d.running && root.indexing && !indexProc.running) {
+          root.indexing = false
+          root.reloadIndexFiles()
+          root.refreshStatus()
+        }
+        root.indexArtists = d.artists || 0
+        root.indexTracks = d.tracks || 0
+        root.indexTrackTotal = d.trackTotal || 0
+        root.indexStage = d.stage || ""
+        root.indexElapsed = d.elapsed || 0
+      }
+    }
+  }
+
+  Timer {
+    id: progressTimer
+    running: root.indexing
+    interval: 1500
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: if (!progressProc.running) progressProc.running = true
   }
 
   Process {
@@ -535,6 +632,11 @@ Item {
     }
     root.indexError = ""
     root.indexReplied = false
+    root.indexArtists = 0
+    root.indexTracks = 0
+    root.indexTrackTotal = 0
+    root.indexStage = "starting"
+    root.indexElapsed = 0
     root.indexing = true
     // A full library takes minutes and writes nothing to watch until it is
     // done, so say so out loud the moment the button is pressed.
@@ -1119,6 +1221,9 @@ Item {
   Component.onCompleted: {
     refreshStatus()
     refreshFavourites()
+    // A scan may have been running when the shell restarted; find out before
+    // the panel offers a Rescan that would start a second one.
+    progressProc.running = true
   }
 
   Component.onDestruction: cavaProc.running = false

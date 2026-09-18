@@ -12,12 +12,22 @@
   Pinning a reachable server now picks the music library and indexes straight
   away, and an install that is already stuck in that state repairs itself the
   next time the panel opens.
+- **A finished scan never reached the panel.** The two index files are read by
+  `FileView`s, and a `FileView` built before its file exists gets no watch — so
+  on a fresh install the scan completed, wrote both files, and the panel went on
+  showing an empty library until the shell was restarted, which nothing told you
+  to do. The panel now re-reads both files itself the moment the scan ends, and
+  again if the scan dies part-way.
 - **Rescan looked like it did nothing.** A full index of a large library takes
   minutes and writes nothing to watch while it runs, and the view a new user
   lands on — favourites, necessarily empty — said only "tap the star on any
-  artist". It now says the index is running, wherever the panel would otherwise
-  claim the library is simply empty, and a toast marks the start and the end
-  with the counts.
+  artist". Every view now shows the scan while it runs, with counts that climb —
+  "Scanning your library — 4,982 artists · 44,882 of 63,198 songs (0:21)" —
+  polled from the helper, which publishes its progress as it pages through the
+  library. A toast marks the start and the end with the final counts, the Rescan
+  button shows itself busy, and a second scan cannot be started over the top of
+  a running one: the helper refuses it too, so a shell restarted mid-scan cannot
+  cause one either — the panel adopts the running scan instead.
 - **A failed index said nothing at all.** Any reason indexing cannot start or
   cannot finish is now shown in the panel rather than stored and forgotten — no
   server, no account, a helper that dies without a word. Failures are also
@@ -39,8 +49,11 @@
   Plex key, never by searching for a name, and leaves the artist's discography
   behind it so Back lands somewhere useful. A track with no album opens the
   artist instead.
+- `plexmusic progress` — how far a running scan has got. It reads one small file
+  and never touches Plex, so the panel can poll it freely.
 - `index` reports how many tracks Plex said it held and how many were skipped
-  for having no title at all, so a gap between the two is visible.
+  for having no title at all, so a gap between the two is visible. On the
+  library this was built against that is 63,198 against 60,002.
 
 ### Security
 

@@ -98,7 +98,10 @@ PanelWindow {
   // told nothing at all was the complaint this answers.
   function indexState(idle) {
     if (!root.service) return idle
-    if (root.service.indexing) return "Indexing the library…"
+    // Live counts while a scan runs — in every view, not just the all-artists
+    // one, because the view a new user lands on is the empty favourites list.
+    if (root.service.indexing)
+      return root.service.indexProgress || "Scanning your library…"
     if (root.service.indexError !== "") return root.service.indexError
     return idle
   }
