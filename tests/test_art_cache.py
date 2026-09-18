@@ -29,11 +29,20 @@ def load_helper():
 
 
 class FakeResponse:
+    """Enough of an HTTP response for the capped reader: a Content-Length
+    header and a read() that honours the size it is asked for."""
+
     def __init__(self, data):
         self.data = data
+        self.pos = 0
+        self.headers = {"Content-Length": str(len(data))}
 
-    def read(self):
-        return self.data
+    def read(self, n=-1):
+        if n is None or n < 0:
+            n = len(self.data) - self.pos
+        out = self.data[self.pos:self.pos + n]
+        self.pos += len(out)
+        return out
 
     def __enter__(self):
         return self
@@ -122,7 +131,11 @@ class ArtCacheTest(unittest.TestCase):
         with self.fake_urlopen(fail=True):
             self.plex.attach_art(items, 96, thumb_field="albumThumb")
         self.assertEqual(items[0]["artUrl"], "")
-        self.assertEqual(os.listdir(self.pm.ART_DIR), [])
+        # Nothing is written, and since the fetch happens before the file is
+        # created the cache directory need not exist at all.
+        self.assertEqual(
+            os.listdir(self.pm.ART_DIR) if os.path.isdir(self.pm.ART_DIR) else [],
+            [])
 
     def test_listings_carry_no_token(self):
         listing = {"MediaContainer": {"Metadata": [

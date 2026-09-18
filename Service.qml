@@ -130,8 +130,63 @@ Item {
     return trackTitle || trackAlbum || "Plex Music"
   }
 
+  // Ceilings on anything we load from disk. The index files are written by
+  // our own helper, but they are built from whatever a Plex server says, so
+  // the shell treats them as untrusted: an index that is too big to be real
+  // is refused outright rather than parsed and published, because everything
+  // here lives in the persistent Quickshell process.
+  //
+  // Sized off the largest real library this has run against (66,626 tracks /
+  // 5,167 artists) with room for one four times bigger, and matching
+  // MAX_INDEX_ITEMS / MAX_FIELD_CHARS in bin/plexmusic. Its track index is
+  // 20 MB on disk (60,002 tracks, ~340 bytes each), so 96 MB is ~5x the real
+  // file and is also what maxIndexItems entries of that size would weigh.
+  readonly property int maxIndexItems: 250000
+  readonly property int maxFieldChars: 512
+  readonly property int maxIndexBytes: 96 * 1024 * 1024
+  // Set when an index was refused, so the panel can say why instead of
+  // silently showing an empty library.
+  property string indexError: ""
+
   function parse(text) {
     try { return JSON.parse(text) } catch (e) { return null }
+  }
+
+  // Parse an index file, or return null and set indexError. `text` is checked
+  // for length before it is parsed, so an absurd file never becomes objects.
+  function parseIndex(text, what) {
+    var s = String(text || "")
+    if (s.length > root.maxIndexBytes) {
+      root.indexError = what + " index is too large (" + s.length
+        + " bytes) — refusing to load it"
+      console.warn("plexmusic:", root.indexError)
+      return null
+    }
+    return root.parse(s)
+  }
+
+  // Refuse an over-long list, and clamp the strings inside the ones we keep.
+  function boundedIndexList(list, what) {
+    if (!list || list.length === undefined) return []
+    if (list.length > root.maxIndexItems) {
+      root.indexError = what + " index holds " + list.length
+        + " items, over the " + root.maxIndexItems + " limit — refusing it"
+      console.warn("plexmusic:", root.indexError)
+      return null
+    }
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i]
+      if (!it) continue
+      var keys = ["title", "artist", "album", "fold", "thumb", "key",
+                  "albumKey", "artistKey", "letter"]
+      for (var k = 0; k < keys.length; k++) {
+        var v = it[keys[k]]
+        if (typeof v === "string" && v.length > root.maxFieldChars)
+          it[keys[k]] = v.substring(0, root.maxFieldChars)
+      }
+    }
+    root.indexError = ""
+    return list
   }
 
   // Lower-case, accents stripped, matching the helper's fold(). Used only on
@@ -161,8 +216,9 @@ Item {
   }
 
   function applyTrackIndex() {
-    var d = root.parse(trackIndexFile.text())
-    var list = (d && d.tracks) ? d.tracks : []
+    var d = root.parseIndex(trackIndexFile.text(), "track")
+    var list = root.boundedIndexList((d && d.tracks) ? d.tracks : [], "track")
+    if (list === null) return
     var idx = {}
     for (var i = 0; i < list.length; i++) {
       var l = list[i].letter || "#"
@@ -174,8 +230,9 @@ Item {
   }
 
   function applyIndex() {
-    var d = root.parse(indexFile.text())
-    var list = (d && d.artists) ? d.artists : []
+    var d = root.parseIndex(indexFile.text(), "artist")
+    var list = root.boundedIndexList((d && d.artists) ? d.artists : [], "artist")
+    if (list === null) return
     var idx = {}
     for (var i = 0; i < list.length; i++) {
       var l = list[i].letter || "#"

@@ -11,12 +11,14 @@ Everything is JSON on stdout so QML can parse it without a shell pipeline.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
+import secrets
 import socket
+import stat
 import subprocess
 import sys
-import threading
 import time
 import unicodedata
 import urllib.error
@@ -46,6 +48,32 @@ PLEX_TV = "https://plex.tv"
 PLEX_PRODUCT = "Omarchy Plex Music"
 PLEX_VERSION = "0.1.0"
 PLEX_PLATFORM = "Linux"
+
+# --------------------------------------------------------------------------- #
+# limits
+#
+# Nothing a server says is trusted to be small. Every response body is capped
+# before it is buffered, and the index we hand the shell is bounded in both
+# item count and per-string length, so a hostile or broken server cannot make
+# the helper or Quickshell eat the machine's memory.
+#
+# The numbers come from the largest real library this has run against — 66,626
+# tracks / 5,167 artists / 10,317 albums — with a wide margin on top:
+#   * MAX_JSON_BYTES: the biggest single response is one 5,000-track page of
+#     /library/sections/<n>/all — measured at 7.2 MiB against that library.
+#     64 MiB is nearly 9x the real worst case and still nothing a desktop
+#     would notice.
+#   * MAX_ART_BYTES: a 500 px transcoded cover is tens of KB; even an
+#     untranscoded original sleeve is a couple of MB. 12 MiB is generous.
+#   * MAX_INDEX_ITEMS: 250,000 is ~3.7x the real track count, so a library
+#     four times the size of ours still indexes, and a runaway one does not.
+#   * MAX_FIELD_CHARS: the longest real title in that library is 250
+#     characters, so 512 is twice the worst case seen — room for a long
+#     classical title, while a megabyte-long "title" is truncated.
+MAX_JSON_BYTES = 64 * 1024 * 1024
+MAX_ART_BYTES = 12 * 1024 * 1024
+MAX_INDEX_ITEMS = 250_000
+MAX_FIELD_CHARS = 512
 
 # No server addresses are baked in. They come from one of two places, in this
 # order: addresses the user typed in (settings.json "servers" — that is how a
@@ -77,13 +105,144 @@ def read_json(path: str, default):
         return default
 
 
+def open_state_dir(path: str) -> int:
+    """Open a private directory of ours and return a verified descriptor.
+
+    Everything this program writes — the Plex token in auth.json, the queue
+    and playlist whose URLs carry that token, the index — lives in a directory
+    that must be ours alone. The final component is opened O_NOFOLLOW, so a
+    symlink planted in its place is refused rather than followed, and the
+    descriptor is then checked with fstat: a directory, owned by us, with no
+    group or other permissions. Loose permissions on a directory we own are
+    tightened to 0700 in place (through the descriptor, not the path, so there
+    is nothing to swap underneath us); anything else is fatal.
+
+    The caller owns the descriptor and must close it.
+    """
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            die(f"{path} is not a directory — refusing to write through it")
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            die(f"{path} is not a directory — refusing to write through it")
+        if st.st_uid != os.getuid():
+            die(f"{path} is not owned by you — refusing to write through it")
+        if st.st_mode & 0o077:
+            os.fchmod(fd, 0o700)
+            st = os.fstat(fd)
+            if st.st_mode & 0o077:
+                die(f"{path} is not private (mode "
+                    f"{stat.S_IMODE(st.st_mode):04o}) — refusing to write")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def atomic_write(path: str, data: bytes, mode: int = 0o600) -> None:
+    """Replace `path` with `data`, safely, and durably.
+
+    The temporary file is created inside a verified owner-only directory,
+    relative to that directory's descriptor, with an unpredictable name and
+    O_CREAT|O_EXCL|O_NOFOLLOW — so it cannot be pre-planted as a symlink and
+    cannot be guessed and raced. The descriptor is re-checked (regular file,
+    ours, one link) before a single byte is written, the data is fsynced
+    before the rename, and the directory is fsynced after it. A crash at any
+    point leaves either the old file or the new one, never a truncated file
+    and never somebody else's file.
+    """
+    directory, name = os.path.split(path)
+    dir_fd = open_state_dir(directory)
+    tmp = f".{name}.{secrets.token_hex(8)}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     mode, dir_fd=dir_fd)
+        try:
+            st = os.fstat(fd)
+            if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                    or st.st_nlink != 1):
+                die(f"refusing to write {path}: the temporary file is not the "
+                    "private regular file we just created")
+            os.fchmod(fd, mode)
+            written = 0
+            while written < len(data):
+                written += os.write(fd, data[written:])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        tmp = ""
+        os.fsync(dir_fd)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp, dir_fd=dir_fd)   # our own temp, nothing else
+            except OSError:
+                pass
+        os.close(dir_fd)
+
+
 def write_json(path: str, data, mode: int = 0o600) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    blob = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    atomic_write(path, blob.encode("utf-8"), mode)
+
+
+class ResponseTooLarge(Exception):
+    """A server sent more than we are willing to hold in memory."""
+
+
+def read_capped(resp, cap: int, what: str = "response") -> bytes:
+    """Read a response body, refusing anything over `cap` bytes.
+
+    Content-Length is checked first, so an oversized body is rejected before
+    it is fetched at all — but it is only a hint, so the cap is enforced again
+    while streaming. A chunked or lying server gets no further than cap + 1
+    bytes into our memory.
+    """
+    declared = resp.headers.get("Content-Length")
+    if declared is not None:
+        try:
+            if int(declared) > cap:
+                raise ResponseTooLarge(
+                    f"{what} declares {int(declared)} bytes, over the "
+                    f"{cap} byte limit")
+        except ValueError:
+            pass
+    buf = bytearray()
+    while True:
+        chunk = resp.read(min(65536, cap + 1 - len(buf)))
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > cap:
+            raise ResponseTooLarge(
+                f"{what} is over the {cap} byte limit")
+    return bytes(buf)
+
+
+def bounded_text(value, limit: int = MAX_FIELD_CHARS) -> str:
+    """A string short enough to publish to the shell."""
+    text = str(value or "")
+    return text[:limit] if len(text) > limit else text
+
+
+def bounded_int(value, default: int = 0) -> int:
+    """An integer field from a server reply, or the default if it is junk."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def fold(text: str) -> str:
@@ -153,7 +312,7 @@ def plex_tv_request(path: str, client_id: str, token: str | None = None,
     req = urllib.request.Request(
         PLEX_TV + path, headers=plex_tv_headers(client_id, token), method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
+        raw = read_capped(resp, MAX_JSON_BYTES, "plex.tv " + path)
     if not raw:
         return {}
     return json.loads(raw.decode("utf-8", errors="replace"))
@@ -189,7 +348,7 @@ class Plex:
             url += ("&" if "?" in path else "?") + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, headers=self.headers())
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+            raw = read_capped(resp, MAX_JSON_BYTES, path)
         # This library is full of old rips whose tags are not valid UTF-8, and
         # Plex hands those bytes straight back. Replace rather than crash — one
         # mangled character in one artist name must not kill the whole index.
@@ -288,7 +447,7 @@ class Plex:
             container = data.get("MediaContainer", {})
             batch = container.get("Metadata") or []
             for m in batch:
-                title = m.get("title") or "<unknown>"
+                title = bounded_text(m.get("title")) or "<unknown>"
                 # Plex's own sort key already drops a leading "The", so the
                 # A-Z browse files The Beatles under B, as a record shop does.
                 # The letter must come from the key's FIRST character, not the
@@ -297,10 +456,10 @@ class Plex:
                 sort_key = fold(m.get("titleSort") or title).lstrip()
                 first = sort_key[:1] or "#"
                 artists.append({
-                    "key": str(m.get("ratingKey")),
+                    "key": bounded_text(m.get("ratingKey")),
                     "title": title,
-                    "thumb": m.get("thumb") or "",
-                    "albums": m.get("childCount") or 0,
+                    "thumb": bounded_text(m.get("thumb")),
+                    "albums": bounded_int(m.get("childCount")),
                     # Pre-folded so the panel can search in QML without a
                     # process per keystroke, and without needing Unicode
                     # normalisation in the QML engine.
@@ -310,6 +469,9 @@ class Plex:
                 })
             total = container.get("totalSize", len(artists))
             start += len(batch)
+            if len(artists) > MAX_INDEX_ITEMS:
+                die(f"this library reports more than {MAX_INDEX_ITEMS} artists "
+                    "— refusing to build an index that large")
             if not batch or start >= total:
                 break
         return artists
@@ -406,7 +568,7 @@ class Plex:
             (self.base or self.resolve_base()) + "/playlists?" + query,
             headers=self.headers(), method="POST")
         with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = resp.read()
+            raw = read_capped(resp, MAX_JSON_BYTES, "playlist response")
         data = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
         items = data.get("MediaContainer", {}).get("Metadata", []) or []
         return {"key": str(items[0].get("ratingKey")) if items else "",
@@ -420,7 +582,7 @@ class Plex:
             + f"/playlists/{playlist_key}/items?" + query,
             headers=self.headers(), method="PUT")
         with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = resp.read()
+            raw = read_capped(resp, MAX_JSON_BYTES, "playlist response")
         data = json.loads(raw.decode("utf-8", errors="replace")) if raw else {}
         return int(data.get("MediaContainer", {}).get("leafCountAdded") or 0)
 
@@ -447,22 +609,24 @@ class Plex:
             if not part:
                 continue
             tracks.append({
-                "key": str(m.get("ratingKey")),
-                "title": m.get("title") or "",
-                "album": m.get("parentTitle") or "",
-                "artist": m.get("grandparentTitle") or m.get("originalTitle") or "",
-                "index": int(m.get("index") or 0),
-                "disc": int(m.get("parentIndex") or 1),
-                "duration": int(m.get("duration") or 0),
-                "part": part["key"],
+                "key": bounded_text(m.get("ratingKey")),
+                "title": bounded_text(m.get("title")),
+                "album": bounded_text(m.get("parentTitle")),
+                "artist": bounded_text(
+                    m.get("grandparentTitle") or m.get("originalTitle")),
+                "index": bounded_int(m.get("index")),
+                "disc": bounded_int(m.get("parentIndex"), default=1),
+                "duration": bounded_int(m.get("duration")),
+                "part": bounded_text(part["key"], 4096),
                 # The vinyl label art. Album cover first, artist shot as the
                 # fallback — 94% of albums here have a cover, 83% of artists do.
-                "albumKey": str(m.get("parentRatingKey") or ""),
-                "albumThumb": m.get("parentThumb") or m.get("grandparentThumb") or "",
+                "albumKey": bounded_text(m.get("parentRatingKey")),
+                "albumThumb": bounded_text(
+                    m.get("parentThumb") or m.get("grandparentThumb")),
                 # So the panel can open the playing track's album and artist
                 # by key, never by searching for a name.
-                "artistKey": str(m.get("grandparentRatingKey") or ""),
-                "albumYear": int(m.get("parentYear") or 0),
+                "artistKey": bounded_text(m.get("grandparentRatingKey")),
+                "albumYear": bounded_int(m.get("parentYear")),
             })
         return tracks
 
@@ -478,25 +642,28 @@ class Plex:
             container = data.get("MediaContainer", {})
             batch = container.get("Metadata") or []
             for m in batch:
-                title = m.get("title") or ""
+                title = bounded_text(m.get("title"))
                 if not title:
                     continue
                 sort_key = fold(m.get("titleSort") or title).lstrip()
                 first = sort_key[:1] or "#"
                 out.append({
-                    "key": str(m.get("ratingKey")),
+                    "key": bounded_text(m.get("ratingKey")),
                     "title": title,
-                    "artist": m.get("grandparentTitle") or "",
-                    "album": m.get("parentTitle") or "",
-                    "albumKey": str(m.get("parentRatingKey") or ""),
-                    "artistKey": str(m.get("grandparentRatingKey") or ""),
-                    "duration": int(m.get("duration") or 0),
-                    "thumb": m.get("parentThumb") or "",
+                    "artist": bounded_text(m.get("grandparentTitle")),
+                    "album": bounded_text(m.get("parentTitle")),
+                    "albumKey": bounded_text(m.get("parentRatingKey")),
+                    "artistKey": bounded_text(m.get("grandparentRatingKey")),
+                    "duration": bounded_int(m.get("duration")),
+                    "thumb": bounded_text(m.get("parentThumb")),
                     "fold": fold(title),
                     "letter": first.upper() if "a" <= first <= "z" else "#",
                 })
             total = container.get("totalSize", len(out))
             start += len(batch)
+            if len(out) > MAX_INDEX_ITEMS:
+                die(f"this library reports more than {MAX_INDEX_ITEMS} tracks "
+                    "— refusing to build an index that large")
             if not batch or start >= total:
                 break
         return out
@@ -534,24 +701,18 @@ class Plex:
             "url": thumb,
         })
         url = f"{base}/photo/:/transcode?{query}"
-        os.makedirs(ART_DIR, mode=0o700, exist_ok=True)
-        tmp = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             req = urllib.request.Request(url, headers=self.headers())
             with urllib.request.urlopen(req, timeout=15) as resp:
-                data = resp.read()
+                data = read_capped(resp, MAX_ART_BYTES, "artwork")
             if not data:
                 return None
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-            os.replace(tmp, target)
+            # Same safe writer as every other file: verified private dir,
+            # unpredictable O_EXCL|O_NOFOLLOW temp, fsync, atomic rename. It
+            # cleans up its own temp file if anything above fails.
+            atomic_write(target, data, 0o600)
             return target
         except Exception:
-            try:
-                os.unlink(tmp)       # our own half-written temp file, never a cover
-            except OSError:
-                pass
             return None
 
 
@@ -1046,13 +1207,10 @@ def start_queue(plex, tracks, source, shuffle, start_index=0, loop=False) -> Non
         lines.append(f"#EXTINF:{seconds},{label}")
         lines.append(plex.stream_url(t["part"]))
 
-    os.makedirs(DATA_DIR, exist_ok=True)
-    tmp = PLAYLIST_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-    # The playlist embeds the Plex token in every URL — keep it owner-only.
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, PLAYLIST_FILE)
+    # The playlist embeds the Plex token in every URL — owner-only, and
+    # written through the same no-follow atomic writer as the JSON files.
+    atomic_write(PLAYLIST_FILE, ("\n".join(lines) + "\n").encode("utf-8"),
+                 0o600)
 
     # `part` stays in the queue: with --shuffle mpv reorders its own playlist,
     # so the only reliable way to know what is playing is to match mpv's
@@ -1404,6 +1562,8 @@ def main() -> None:
         die(f"Plex returned HTTP {exc.code} for {exc.url}")
     except urllib.error.URLError as exc:
         die(f"cannot reach Plex: {exc.reason}")
+    except ResponseTooLarge as exc:
+        die(f"refusing an oversized reply from Plex: {exc}", code=4)
 
 
 if __name__ == "__main__":
