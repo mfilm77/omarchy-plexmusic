@@ -148,6 +148,24 @@ lists them all with round-trip times.
 
 Two files are also `0600` because they embed the token in stream URLs: the
 generated queue (`~/.local/share/omarchy-plex-music/queue.m3u`) and its metadata.
+Every file the plugin keeps is `0600` and every directory it keeps is `0700`,
+including the cached index — a copy left `0644` by an earlier version is
+tightened the next time it is written.
+
+**If you manage your dotfiles with symlinks** — stow, chezmoi, a bare git repo —
+read this, because the plugin deliberately will not write through a link:
+
+- If `~/.config/omarchy-plex-music` or `~/.local/share/omarchy-plex-music` is
+  **itself a symlink**, the write is **refused** with a message and nothing is
+  written. Make them real directories (you can still symlink files into them).
+- If an **individual file** inside them is a symlink, that link is **replaced by
+  a real file** on the next write, and a line saying so is added to
+  `~/.cache/omarchy-plex-music/plexmusic.log`. Your link is gone; the file it
+  pointed at is left untouched.
+
+This is deliberate, and it is what stops another process redirecting the file
+that holds your Plex token. Files are read the same way: a symlink in place of
+one of these files is ignored rather than followed.
 
 ## Keyboard shortcuts and macropads
 

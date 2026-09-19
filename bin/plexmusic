@@ -92,6 +92,11 @@ MAX_JSON_BYTES = 64 * 1024 * 1024
 MAX_ART_BYTES = 12 * 1024 * 1024
 MAX_INDEX_ITEMS = 250_000
 MAX_FIELD_CHARS = 512
+#   * MAX_IPC_BYTES: an mpv IPC reply is one JSON line of a few hundred bytes,
+#     and the largest we ask for is a path. 1 MiB is three orders of magnitude
+#     over the real worst case, and it stops a misbehaving local mpv filling
+#     memory for the whole 1.5 s the socket read is allowed.
+MAX_IPC_BYTES = 1024 * 1024
 
 # Belt and braces for the log: the token travels in a header everywhere, but a
 # line that somehow carried one must never reach a file we keep.
@@ -319,17 +324,59 @@ def index_running(progress: dict) -> bool:
     if not pid or progress.get("stage") == "done":
         return False
     try:
+        # The only plain open() left in the program, and the only read with a
+        # length rather than the capped reader: /proc is kernel-backed, cannot
+        # be a symlink to a user file, and int(pid) makes the path
+        # untraversable. It is read with a length anyway — argv[0] is the
+        # first thing in it — so the release standard's SEC-3 grep for an
+        # unbounded read has no hit left to stop on.
         with open(f"/proc/{int(pid)}/cmdline", "rb") as fh:
-            return b"plexmusic" in fh.read()
+            return b"plexmusic" in fh.read(4096)
     except (OSError, ValueError):
         return False
 
 
-def read_json(path: str, default):
+def read_json(path: str, default, max_bytes: int = MAX_JSON_BYTES):
+    """Parse one of our own JSON files — no symlink, no unbounded read.
+
+    Every reader in the program now behaves like the writers: the file is
+    opened O_NOFOLLOW and the descriptor is checked with fstat (a regular
+    file, owned by us) before a byte is read, and no more than `max_bytes`
+    is taken however large the file claims to be. These files hold the Plex
+    token (auth.json), the tokened queue URLs (queue.json) and the index, so
+    a link planted in their place must not be read through.
+
+    Anything refused — a link, someone else's file, an oversized or
+    unparseable file — comes back as `default`, which is exactly what a
+    missing file has always returned. Callers are unchanged and still answer
+    with their own clean message rather than a traceback. The mode is
+    deliberately not checked: an index left 0644 by an earlier version is
+    still read, and is tightened the next time it is written.
+    """
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return default
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            return default
+        raw = bytearray()
+        while len(raw) < max_bytes:
+            chunk = os.read(fd, min(1 << 20, max_bytes - len(raw)))
+            if not chunk:
+                break
+            raw += chunk
+        else:
+            if os.read(fd, 1):
+                return default          # larger than we are willing to parse
+    except OSError:
+        return default
+    finally:
+        os.close(fd)
+    try:
+        return json.loads(bytes(raw).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
         return default
 
 
@@ -424,6 +471,18 @@ def atomic_write(path: str, data: bytes, mode: int = 0o600,
             os.fsync(fd)
         finally:
             os.close(fd)
+        # Case A: the destination itself was a symlink — a stow- or
+        # chezmoi-managed dotfile, say. The rename replaces the link with a
+        # real file rather than writing through it, which is the point; but
+        # the user would otherwise lose their link with no message anywhere.
+        # (log_failure's own write comes back through here; its `_logging`
+        # guard is what stops that recursing.)
+        try:
+            if stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode):
+                log_failure(f"{path} was a symlink; it has been replaced by a "
+                            "real file — the plugin does not write through links")
+        except OSError:
+            pass
         os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         tmp = ""
         os.fsync(dir_fd)
@@ -1020,10 +1079,12 @@ def mpv_request(command: list, timeout: float = 1.5):
             buffer = b""
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                chunk = sock.recv(65536)
+                chunk = sock.recv(min(65536, MAX_IPC_BYTES + 1 - len(buffer)))
                 if not chunk:
                     break
                 buffer += chunk
+                if len(buffer) > MAX_IPC_BYTES:
+                    return None     # not a reply to our command, whatever it is
                 for line in buffer.split(b"\n"):
                     if not line.strip():
                         continue
@@ -1378,7 +1439,7 @@ def cmd_index(args) -> None:
         "server": plex.base,
         "section": plex.section,
         "artists": artists,
-    }, mode=0o644)
+    })
 
     publish(stage="tracks", artists=len(artists))
     tracks = plex.all_tracks(
@@ -1388,7 +1449,7 @@ def cmd_index(args) -> None:
         "server": plex.base,
         "section": plex.section,
         "tracks": tracks,
-    }, mode=0o644)
+    })
 
     result = {"artistCount": len(artists), "trackCount": len(tracks),
               "trackTotal": getattr(plex, "track_total", 0),

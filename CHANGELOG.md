@@ -74,6 +74,25 @@ Both findings from the Omarchy marketplace security review of `0c0c813`
   the new failure log all use it — there is no other write path in the program.
   A **symlinked** config or data directory is now refused rather than written
   through.
+- **Every file is read the same way.** The readers now match the writers:
+  a state file is opened `O_NOFOLLOW` and its descriptor checked (a regular
+  file, owned by you) before a byte is read, and no more than the JSON limit is
+  read however large the file claims to be. A symlink planted in place of
+  `auth.json`, `queue.json` or an index is ignored rather than followed, and a
+  refused file reads as a missing one — the same clean message as before, never
+  a traceback. An index left `0644` by an earlier version is still read; it is
+  tightened the next time it is written.
+- **The two index files are written `0600`,** like everything else the plugin
+  keeps. They hold no token — only artist and track names — but nothing this
+  plugin writes needs to be readable by anyone but you.
+- **The mpv IPC reply has a byte ceiling** (1 MiB). It was accumulated with no
+  limit for the whole 1.5 s timeout; a real reply is a few hundred bytes.
+- **A replaced symlinked file now says so.** If an individual file inside the
+  config or data directory is a symlink — a stow or chezmoi setup — it is
+  replaced by a real file rather than written through, and a line recording
+  that goes to `~/.cache/omarchy-plex-music/plexmusic.log` instead of the
+  change happening in silence. Both behaviours are documented in the README
+  under "Your credentials".
 - **Every network reply is capped before it is buffered.** Plex JSON and
   artwork were read to EOF with no limit, and the persistent shell then read
   whole generated indexes. An over-limit `Content-Length` is now refused before
